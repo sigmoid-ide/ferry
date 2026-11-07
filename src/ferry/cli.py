@@ -60,6 +60,9 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, paramiko.SSHException) as e:
         print(f"ferry: the connection failed: {e}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("\nferry: stopped", file=sys.stderr)
+        return 130
 
 
 def _parse_target(target: str) -> tuple[str, str | None, int | None]:

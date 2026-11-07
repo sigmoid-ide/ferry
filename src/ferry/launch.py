@@ -52,6 +52,7 @@ def run(name: str, command: list[str], why: str | None, parent_ref: str | None) 
         paths = remote.paths(project_key(store.root), run_dir.name)
         mirror.write_state(run_dir, {"machine": name, "dir": paths.run_dir, "pidfile": paths.pidfile, "venv": venv})
         started = time.monotonic()
+        may_be_running = False
         try:
             files = read_json(run_dir / "files.json", {}).get("files", {})
             shas = sorted({entry["sha"] for entry in files.values()})
@@ -60,12 +61,21 @@ def run(name: str, command: list[str], why: str | None, parent_ref: str | None) 
             say(f"sent {len(missing)} of {len(shas)} files ({len(shas) - len(missing)} already on {name})")
             remote.send_files(paths.run_dir, run_dir, RUN_FILES)
             remote.checkout(paths)
+            may_be_running = True
             remote.start(paths, venv, command)
-        except FerryError as e:
+        except BaseException as e:
+            if may_be_running and not isinstance(e, FerryError):
+                # Cut off while the machine was starting it: it may well be going. Keep it, and say how to find out.
+                say(f"lost {name} while the run was starting; it may be going there. "
+                    f"`ferry attach {run_dir.name[-4:]}` follows it, `ferry stop {run_dir.name[-4:]}` stops it")
+                raise
             # The launch failed after the run was recorded: keep it, with the reason.
-            append_jsonl(run_dir / "notes.jsonl", {"at": timestamp(), "kind": "ferry", "value": str(e)})
+            interrupted = isinstance(e, KeyboardInterrupt)
+            reason = "the launch was interrupted" if interrupted else (str(e) or type(e).__name__)
+            append_jsonl(run_dir / "notes.jsonl", {"at": timestamp(), "kind": "ferry", "value": reason})
             (run_dir / mirror.REMOTE_FILE).unlink(missing_ok=True)
-            finish_run(run_dir, status="crashed", exit_code=None, duration=time.monotonic() - started)
+            finish_run(run_dir, status="killed" if interrupted else "crashed", exit_code=None,
+                       duration=time.monotonic() - started)
             raise
         say(f"run {run_dir.name} started on {name}. Ctrl+C stops copying, not the run")
         return mirror.follow(remote, run_dir)
