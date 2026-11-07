@@ -187,6 +187,14 @@ class Remote:
         """How each run ([run_dir, pidfile]) is: running, ended, gone (stopped without an end) or missing."""
         return json.loads(self.call("states", stdin=json.dumps(runs).encode()))
 
+    def clean_plan(self, project: str) -> dict:
+        """What `ferry clean` can remove: idle environments and, for `project`, ended runs' folders."""
+        return json.loads(self.call("clean-plan", self.root, project, timeout=600))
+
+    def clean(self, project: str, envs: list[str], runs: list[str]) -> dict:
+        return json.loads(self.call("clean", self.root, project, stdin=json.dumps({"envs": envs, "runs": runs}).encode(),
+                                    timeout=900))
+
     def hashes(self, run_dir: str) -> dict[str, str]:
         return json.loads(self.call("hash", run_dir))
 

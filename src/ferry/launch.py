@@ -12,8 +12,8 @@ import paramiko
 from hunch.capture import capture_env, start_run
 from hunch.store import LOST_AFTER_SECONDS, Store, append_jsonl, finish_run, read_json, timestamp, write_json
 
-from . import data, mirror
-from .config import FerryError, get_machine
+from . import box, data, mirror
+from .config import FerryError, can_ask, get_machine
 from .envspec import env_spec, local_python
 from .remote import Remote, project_key
 from .ssh import Box
@@ -261,3 +261,48 @@ def forget(ref: str) -> int:
     os.utime(beat, (stale, stale))
     say(f"run {short} shows as lost now. If {machine} comes back, `ferry attach {short}` picks it up again")
     return 0
+
+
+def clean(name: str, outputs: bool, yes: bool) -> int:
+    """Frees disk space on a machine: environments no run has asked for in a while, and
+    with --outputs what this project's ended runs wrote there, except runs marked keep."""
+    store = Store.find()
+    remote = connect(name)
+    try:
+        project = project_key(store.root)
+        plan = remote.clean_plan(project)
+        known = {run.id: run for run in store.runs()}
+        # Runs this journal does not know, and runs marked keep, are left alone.
+        runs = [(known[entry["id"]], entry["size"]) for entry in plan["runs"]
+                if entry["id"] in known and known[entry["id"]].verdict != "keep"]
+        envs = plan["envs"]
+        print(f"{name} has {data.human(plan['free'])} free.")
+        if envs:
+            print(f"  {len(envs)} environment{'s' if len(envs) != 1 else ''} no run has asked for in "
+                  f"{box.CLEAN_AFTER_DAYS} days: removing {'them' if len(envs) != 1 else 'it'} and uv's download cache "
+                  f"frees about {data.human(plan['freed'])}. New environments download their packages again.")
+        total = sum(size for _, size in runs)
+        if runs and outputs:
+            print(f"  what {len(runs)} ended run{'s' if len(runs) != 1 else ''} of this project wrote there, "
+                  f"{data.human(total)} (runs you marked keep stay):")
+            for run, size in runs:
+                print(f"    {run.id[-4:]}  {data.human(size):>9}  {run.why or ''}".rstrip())
+        elif runs:
+            print(f"  ended runs of this project keep {data.human(total)} there (checkpoints and the like); "
+                  f"ferry clean {name} --outputs removes them, except runs you marked keep.")
+        if not envs and not (outputs and runs):
+            print("nothing to remove.")
+            return 0
+        if not yes:
+            if not can_ask():
+                raise FerryError("nothing removed: run again with --yes to remove these")
+            if input("Remove these? [y/N] ").strip().lower() not in ("y", "yes"):
+                print("nothing removed.")
+                return 0
+        done = remote.clean(project, envs, [run.id for run, _ in runs] if outputs else [])
+        say(f"freed {data.human(max(done['freed'], 0))} on {name}")
+        if done["cache"] is False:
+            say("uv's download cache is in use, so it stayed; ferry clean again later clears it")
+        return 0
+    finally:
+        remote.box.close()

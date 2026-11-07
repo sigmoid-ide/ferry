@@ -71,6 +71,14 @@ def main(argv: list[str] | None = None) -> int:
     forget.add_argument("run")
     forget.set_defaults(handler=cmd_forget)
 
+    clean = commands.add_parser("clean", help="free disk space on a machine")
+    clean.add_argument("machine")
+    clean.add_argument("--outputs", action="store_true",
+                       help="also remove what this project's ended runs wrote there, such as checkpoints, "
+                            "except runs you marked keep in Hunch")
+    clean.add_argument("--yes", action="store_true", help="remove without asking")
+    clean.set_defaults(handler=cmd_clean)
+
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
@@ -173,3 +181,8 @@ def cmd_ps(args) -> int:
 
 def cmd_forget(args) -> int:
     return launch.forget(args.run)
+
+
+def cmd_clean(args) -> int:
+    get_machine(args.machine)
+    return launch.clean(args.machine, args.outputs, args.yes)

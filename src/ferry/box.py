@@ -5,6 +5,7 @@ it can use Hunch. Standard library only, Python 3.8 and newer.
 Usage: python3 box.py <command> [arguments]
 """
 
+import glob
 import hashlib
 import io
 import json
@@ -12,6 +13,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -158,6 +160,8 @@ def cmd_want(shared):
 def cmd_outputs(workdir, files_json):
     """Prints [path, size] for each file a run wrote in its folder: everything but its
     code and the linked data."""
+    if not os.path.isdir(workdir):
+        raise SystemExit("the run's folder is no longer on this machine (ferry clean --outputs removes it)")
     with open(files_json, encoding="utf-8") as f:
         code = set(json.load(f)["files"])
     out = []
@@ -205,6 +209,7 @@ def cmd_env(root, key, python):
             print("another run is building this environment; waiting for it", flush=True)
             fcntl.flock(lock, fcntl.LOCK_EX)
         _build_env(root, venv, python, requirements)
+        open(os.path.join(venv, ".used"), "w").close()  # when a run last asked for it, for `ferry clean`
     print(ENV_MARK + venv)
 
 
@@ -419,6 +424,133 @@ def cmd_states():
     print(json.dumps(out))
 
 
+CLEAN_AFTER_DAYS = 14  # `ferry clean` removes environments no run has asked for in this long
+
+
+def _envs_in_use(root):
+    """The environments of the runs going on this machine now."""
+    used = set()
+    for pidfile in glob.glob(os.path.join(root, "projects", "*", "pids", "*")):
+        pid = _alive(pidfile)
+        if pid is None:
+            continue
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                args = f.read().split(b"\0")
+            used.add(os.fsdecode(args[args.index(b"supervise") + 3]))  # supervise run_dir workdir venv
+        except (OSError, ValueError, IndexError):
+            pass
+    return used
+
+
+def _last_used(venv):
+    for name in (".used", ".ready"):
+        try:
+            return os.path.getmtime(os.path.join(venv, name))
+        except OSError:
+            pass
+    return os.path.getmtime(venv)  # a build that never finished
+
+
+def _idle_envs(root):
+    """Environments no run uses now and none has asked for in CLEAN_AFTER_DAYS, and how many others there are."""
+    folder = os.path.join(root, "envs")
+    in_use = _envs_in_use(root)
+    old = time.time() - CLEAN_AFTER_DAYS * 86400
+    idle, kept = [], 0
+    for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        venv = os.path.join(folder, name)
+        if not os.path.isdir(venv):
+            continue
+        if venv in in_use or _last_used(venv) > old:
+            kept += 1
+        else:
+            idle.append(name)
+    return idle, kept
+
+
+def _freed_by(folders):
+    """The disk space removing these folders gives back: their files that nothing outside
+    them links to. uv links packages from its cache into environments, so an environment
+    alone frees little until the cache goes too."""
+    seen = {}
+    for top in folders:
+        for folder, _, names in os.walk(top):
+            for name in names:
+                try:
+                    st = os.lstat(os.path.join(folder, name))
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode):
+                    key = (st.st_dev, st.st_ino)
+                    found, links, size = seen.get(key, (0, st.st_nlink, getattr(st, "st_blocks", 0) * 512 or st.st_size))
+                    seen[key] = (found + 1, links, size)
+    return sum(size for found, links, size in seen.values() if found >= links)
+
+
+def _ended_runs(root, project):
+    """The ids of the project's runs that ended here and still have their folder."""
+    base = os.path.join(root, "projects", project)
+    work = os.path.join(base, "work")
+    return [run_id for run_id in (sorted(os.listdir(work)) if os.path.isdir(work) else [])
+            if os.path.exists(os.path.join(base, ".hunch", "runs", run_id, "end.json"))
+            and not _alive(os.path.join(base, "pids", run_id))]
+
+
+def cmd_clean_plan(root, project=""):
+    """What `ferry clean` can remove, as JSON: idle environments and what removing them
+    with uv's cache frees, and the project's ended runs with the size of their folders."""
+    idle, kept = _idle_envs(root)
+    folders = [os.path.join(root, "envs", name) for name in idle] + [os.path.join(root, "cache", "uv")]
+    runs = []
+    if project:
+        work = os.path.join(root, "projects", project, "work")
+        runs = [{"id": run_id, "size": _freed_by([os.path.join(work, run_id)])} for run_id in _ended_runs(root, project)]
+    print(json.dumps({"envs": idle, "kept": kept, "freed": _freed_by(folders) if idle else 0, "runs": runs,
+                      "free": shutil.disk_usage(root).free}))
+
+
+def cmd_clean(root, project=""):
+    """Removes what stdin names ({"envs": [...], "runs": [...]}), checking each again: an
+    environment a run asked for since, or a run that is going, stays. Clears uv's cache
+    once an environment went, and prints what it removed and freed."""
+    import fcntl
+
+    asked = json.load(sys.stdin)
+    before = shutil.disk_usage(root).free
+    idle = set(_idle_envs(root)[0])
+    envs = 0
+    for name in asked.get("envs", []):
+        if name not in idle:
+            continue
+        venv = os.path.join(root, "envs", name)
+        with open(venv + ".lock", "w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                continue  # a run is having it built right now
+            shutil.rmtree(venv)
+        envs += 1
+    cache = None
+    if envs:
+        env = dict(os.environ)
+        env["UV_CACHE_DIR"] = os.path.join(root, "cache", "uv")
+        try:
+            cache = subprocess.run([os.path.join(root, "bin", "uv"), "cache", "clean", "--quiet"], env=env,
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=600).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            cache = False
+    runs = 0
+    if project:
+        ended = set(_ended_runs(root, project))
+        for run_id in asked.get("runs", []):
+            if run_id in ended:
+                shutil.rmtree(os.path.join(root, "projects", project, "work", run_id))
+                runs += 1
+    print(json.dumps({"envs": envs, "runs": runs, "cache": cache, "freed": shutil.disk_usage(root).free - before}))
+
+
 def cmd_hash(run_dir):
     """Checksums of a run's files, so the copy at home can be checked."""
     out = {}
@@ -484,6 +616,8 @@ COMMANDS = {
     "hash": cmd_hash,
     "now": cmd_now,
     "gpus": cmd_gpus,
+    "clean-plan": cmd_clean_plan,
+    "clean": cmd_clean,
 }
 
 if __name__ == "__main__":

@@ -72,6 +72,16 @@ machine how its runs are doing. A run whose process on the machine dies without 
 machine is gone for good, `ferry forget a7f3` stops counting its run as running, and Hunch shows it as lost; should the
 machine come back, `ferry attach a7f3` picks the run up again.
 
+## Disk space
+
+```bash
+ferry clean mybox             # environments no run has asked for in 14 days
+ferry clean mybox --outputs   # and what this project's ended runs wrote there, except runs you marked keep
+```
+
+Both say what they would remove and how much space that frees, and ask first. An environment is built again when a run
+needs it.
+
 ## What stays where
 
 Nothing secret goes into `.hunch/` or to the machine: no keys, no passwords. Tokens passed with `--env` exist only in
