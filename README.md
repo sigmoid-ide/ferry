@@ -21,8 +21,8 @@ including [uv](https://github.com/astral-sh/uv), which it downloads once and che
 ## Running
 
 `ferry add` shows the machine's host key the first time and pins it; a changed key stops Ferry until you remove the
-old one. Ferry uses your SSH setup as it is: `~/.ssh/config`, your keys and ssh-agent. A key with a passphrase is
-asked for in the terminal.
+old one. Ferry uses your SSH setup as it is: `~/.ssh/config` (with `ProxyJump` for a machine behind a jump host),
+your keys and ssh-agent. A key with a passphrase is asked for in the terminal.
 
 `ferry run` records the run on your computer first (code, git branch, the run it builds on), then:
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -22,6 +23,14 @@ def can_ask() -> bool:
     """Whether someone is at a terminal to answer. Both ends must be terminals: on
     Windows, input from the null device (as an editor gives) also counts as one."""
     return sys.stdin.isatty() and sys.stderr.isatty()
+
+
+def parse_target(target: str) -> tuple[str, str | None, int | None]:
+    """user@host:port, where only the host is needed, as (host, user, port)."""
+    match = re.fullmatch(r"(?:(?P<user>[^@]+)@)?(?P<host>[^:@]+)(?::(?P<port>\d+))?", target)
+    if match is None:
+        raise FerryError(f"could not read {target!r}; use user@host or user@host:port")
+    return match["host"], match["user"], int(match["port"]) if match["port"] else None
 
 
 def home() -> Path:

@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import sys
 
 import paramiko
 from hunch.store import HunchError
 
 from . import __version__, launch
-from .config import FerryError, Machine, can_ask, get_machine, load_machines, save_machine
+from .config import FerryError, Machine, can_ask, get_machine, load_machines, parse_target, save_machine
 from .remote import Remote
 from .ssh import Box
 
@@ -93,19 +92,12 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
 
-def _parse_target(target: str) -> tuple[str, str | None, int | None]:
-    match = re.fullmatch(r"(?:(?P<user>[^@]+)@)?(?P<host>[^:@]+)(?::(?P<port>\d+))?", target)
-    if match is None:
-        raise FerryError(f"could not read {target!r}; use user@host or user@host:port")
-    return match["host"], match["user"], int(match["port"]) if match["port"] else None
-
-
 def cmd_add(args) -> int:
-    host, user, port = _parse_target(args.target)
+    host, user, port = parse_target(args.target)
     machine = Machine(name=args.name, host=host, user=user, port=port, key=args.key)
 
-    def trust(fp: str, kind: str) -> bool:
-        print(f"{args.name}: first time connecting. Its {kind} host key is\n  {fp}")
+    def trust(label: str, fp: str, kind: str) -> bool:
+        print(f"{label}: first time connecting. Its {kind} host key is\n  {fp}")
         if args.yes:
             return True
         if not can_ask():

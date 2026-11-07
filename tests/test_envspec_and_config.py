@@ -3,8 +3,7 @@
 import hunch
 import pytest
 
-from ferry.cli import _parse_target
-from ferry.config import FerryError, Machine, get_machine, load_machines, save_machine
+from ferry.config import FerryError, Machine, get_machine, load_machines, parse_target, save_machine
 from ferry.envspec import env_spec
 from ferry.remote import project_key
 
@@ -46,8 +45,8 @@ def test_machines_are_saved_without_secrets(tmp_path, monkeypatch):
 
 
 def test_targets_and_project_keys():
-    assert _parse_target("me@gpu.lab:2222") == ("gpu.lab", "me", 2222)
-    assert _parse_target("gpu-box") == ("gpu-box", None, None)
+    assert parse_target("me@gpu.lab:2222") == ("gpu.lab", "me", 2222)
+    assert parse_target("gpu-box") == ("gpu-box", None, None)
     assert project_key(__import__("pathlib").Path("My Project")).startswith("My-Project-")
 
 
