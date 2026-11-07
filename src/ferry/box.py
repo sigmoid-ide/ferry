@@ -44,6 +44,32 @@ def _write_atomic(path, data):
     os.replace(tmp, path)
 
 
+def _safe_parts(rel):
+    """A project-relative path as its parts, refusing anything that could leave the folder."""
+    parts = rel.split("/")
+    if rel.startswith("/") or "\\" in rel or ".." in parts or not all(parts):
+        raise SystemExit("refusing an unsafe path: %r" % rel)
+    return parts
+
+
+PART_SUFFIX = ".ferry-part"  # a data file still arriving; never linked into a run
+
+
+def _link_shared(shared, workdir):
+    """Links what the project keeps on this machine into a run's folder, at the same paths.
+    Where the code has a file of the same name, the code wins."""
+    if not os.path.isdir(shared):
+        return
+    for name in os.listdir(shared):
+        if name.endswith(PART_SUFFIX):
+            continue
+        source, dest = os.path.join(shared, name), os.path.join(workdir, name)
+        if not os.path.lexists(dest):
+            os.symlink(source, dest)
+        elif os.path.isdir(source) and not os.path.islink(source) and os.path.isdir(dest) and not os.path.islink(dest):
+            _link_shared(source, dest)
+
+
 def _alive(pidfile):
     """Whether the supervisor named in `pidfile` still runs. A reused pid, or a finished
     process nobody has reaped yet, does not count."""
@@ -95,22 +121,55 @@ def cmd_unpack(objects):
     print(count)
 
 
-def cmd_checkout(objects, files_json, workdir):
-    """Writes the run's code, exactly as recorded, into an empty folder."""
+def cmd_checkout(objects, files_json, workdir, shared=None):
+    """Writes the run's code, exactly as recorded, into an empty folder, then links in
+    what the project keeps on this machine (its data)."""
     with open(files_json, encoding="utf-8") as f:
         files = json.load(f)["files"]
     os.makedirs(workdir, exist_ok=True)
     for rel, entry in files.items():
-        parts = rel.split("/")
-        if rel.startswith("/") or "\\" in rel or ".." in parts or not all(parts):
-            raise SystemExit("refusing an unsafe path in the snapshot: %r" % rel)
+        parts = _safe_parts(rel)
         with open(_object_path(objects, entry["sha"]), "rb") as f:
             raw = zlib.decompress(f.read())
         dest = os.path.join(workdir, *parts)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         with open(dest, "wb") as f:
             f.write(raw[raw.index(b"\0") + 1:])
+    if shared:
+        _link_shared(shared, workdir)
     print(len(files))
+
+
+def cmd_want(shared):
+    """Reads [path, size, mtime] for data files on stdin and prints the paths this
+    machine lacks or has in another version, as rsync's quick check does."""
+    want = []
+    for rel, size, mtime in json.load(sys.stdin):
+        try:
+            st = os.stat(os.path.join(shared, *_safe_parts(rel)))
+        except FileNotFoundError:
+            want.append(rel)
+            continue
+        if st.st_size != size or int(st.st_mtime) != int(mtime):
+            want.append(rel)
+    print(json.dumps(want))
+
+
+def cmd_outputs(workdir, files_json):
+    """Prints [path, size] for each file a run wrote in its folder: everything but its
+    code and the linked data."""
+    with open(files_json, encoding="utf-8") as f:
+        code = set(json.load(f)["files"])
+    out = []
+    for folder, dirs, names in os.walk(workdir):
+        dirs[:] = sorted(d for d in dirs if not os.path.islink(os.path.join(folder, d)) and d != "__pycache__")
+        for name in sorted(names):
+            path = os.path.join(folder, name)
+            rel = os.path.relpath(path, workdir).replace(os.sep, "/")
+            if rel in code or os.path.islink(path):
+                continue
+            out.append([rel, os.path.getsize(path)])
+    print(json.dumps(out))
 
 
 def cmd_bootstrap_uv(root, url, sha256):
@@ -365,6 +424,8 @@ COMMANDS = {
     "missing": cmd_missing,
     "unpack": cmd_unpack,
     "checkout": cmd_checkout,
+    "want": cmd_want,
+    "outputs": cmd_outputs,
     "bootstrap-uv": cmd_bootstrap_uv,
     "env": cmd_env,
     "start": cmd_start,

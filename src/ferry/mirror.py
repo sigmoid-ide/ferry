@@ -21,6 +21,7 @@ from pathlib import Path
 import paramiko
 from hunch.store import LOST_AFTER_SECONDS, read_json, write_json
 
+from . import data
 from .config import FerryError
 from .remote import Remote
 
@@ -141,6 +142,35 @@ class _CopyLock:
             pass  # another ferry holds it now
 
 
+MISSING_FILE = (b"FileNotFoundError", b"No such file or directory")
+
+
+def _report_files(remote: Remote, state: dict, run_dir: Path, label: str, status: str) -> None:
+    """Says what the run left on the machine, and, when it crashed looking for a file,
+    that only the code goes there on its own."""
+    short = run_dir.name[-4:]
+    if status == "crashed":
+        try:
+            with open(run_dir / "output.log", "rb") as f:
+                tail = f.read()[-4000:]
+        except OSError:
+            tail = b""
+        if any(mark in tail for mark in MISSING_FILE):
+            print(f"ferry: the run could not find a file. Only the code goes to {label} on its own; send data with "
+                  f"--data PATH, and it stays there for later runs.", file=sys.stderr)
+    try:
+        outputs = remote.outputs(data.work_dir(state), state["dir"])
+    except (FerryError, OSError, paramiko.SSHException):
+        return  # an older run folder, or the machine went away: nothing to say
+    if outputs:
+        try:
+            where = data.here(run_dir.parent.parent.parent)  # <project>/.hunch/runs/<id>
+        except ValueError:
+            where = ""
+        print(f"ferry: the run wrote {', '.join(data.summary(outputs, where)[:4])} on {label}. "
+              f"Bring them home with: ferry pull {short} PATH", file=sys.stderr)
+
+
 def follow(remote: Remote, run_dir: Path, echo_output: bool = True) -> int:
     """Copies the run home until it ends. Ctrl+C stops copying, never the run."""
     with _CopyLock(run_dir):
@@ -202,5 +232,6 @@ def _follow(remote: Remote, run_dir: Path, echo_output: bool) -> int:
     end = read_json(run_dir / "end.json", {})
     status = end.get("status", "finished")
     print(f"ferry: run {run_dir.name} {status} on {label}; everything is home.", file=sys.stderr)
+    _report_files(remote, state, run_dir, label, status)
     code = end.get("exit_code")
     return 0 if status == "finished" else (code if isinstance(code, int) and code > 0 else 1)

@@ -7,7 +7,8 @@ Layout on the machine, under ~/.ferry:
   projects/<project>/objects/            code, one file per content, shared by runs
   projects/<project>/.hunch/runs/<id>/   the run, as Hunch writes it
   projects/<project>/work/<id>/          the code the run ran in
-  projects/<project>/shared/             kept between runs, for data and checkpoints ($FERRY_SHARED)
+  projects/<project>/shared/             data sent with --data, at the project's own paths, linked
+                                         into every run's folder and kept between runs ($FERRY_SHARED)
   projects/<project>/pids/<id>           the run's supervisor
 """
 
@@ -62,6 +63,9 @@ class Remote:
         self.root = f"{self.home}/.ferry"
         self.helper = f"{self.root}/box.py"
 
+    def shared(self, project: str) -> str:
+        return f"{self.root}/projects/{project}/shared"
+
     def paths(self, project: str, run_id: str) -> RunPaths:
         base = f"{self.root}/projects/{project}"
         return RunPaths(
@@ -69,7 +73,7 @@ class Remote:
             objects=f"{base}/objects",
             run_dir=f"{base}/.hunch/runs/{run_id}",
             work=f"{base}/work/{run_id}",
-            shared=f"{base}/shared",
+            shared=self.shared(project),
             pidfile=f"{base}/pids/{run_id}",
         )
 
@@ -132,6 +136,20 @@ class Remote:
                 tar.add(str(local_objects / sha[:2] / sha[2:]), arcname=f"{sha[:2]}/{sha[2:]}")
         self.call("unpack", objects, stdin=buf.getvalue())
 
+    def mkdirs(self, dirs: list[str]) -> None:
+        for i in range(0, len(dirs), 200):  # keeps each command line short
+            self.call("mkdirs", *dirs[i:i + 200])
+
+    def want(self, shared: str, entries: list[list]) -> list[str]:
+        """Which of these data files ([path, size, mtime]) the machine lacks or has in another version."""
+        if not entries:
+            return []
+        return json.loads(self.call("want", shared, stdin=json.dumps(entries).encode()))
+
+    def outputs(self, work: str, run_dir: str) -> list[list]:
+        """[path, size] of each file the run wrote in its folder."""
+        return json.loads(self.call("outputs", work, f"{run_dir}/files.json"))
+
     def send_files(self, remote_dir: str, local_dir: Path, names: list[str]) -> None:
         self.call("mkdirs", remote_dir)
         sftp = self.box.sftp()
@@ -141,7 +159,7 @@ class Remote:
                 sftp.put(str(path), f"{remote_dir}/{name}")
 
     def checkout(self, paths: RunPaths) -> None:
-        self.call("checkout", paths.objects, f"{paths.run_dir}/files.json", paths.work)
+        self.call("checkout", paths.objects, f"{paths.run_dir}/files.json", paths.work, paths.shared)
 
     def start(self, paths: RunPaths, venv: str, command: list[str], cwd: str = ".") -> int:
         """Starts the run in `cwd`, the project-relative folder it was launched from here."""

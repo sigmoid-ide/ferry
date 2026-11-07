@@ -9,7 +9,7 @@ from pathlib import Path
 from hunch.capture import capture_env, start_run
 from hunch.store import Store, append_jsonl, finish_run, read_json, timestamp, write_json
 
-from . import mirror
+from . import data, mirror
 from .config import FerryError, get_machine
 from .envspec import env_spec, local_python
 from .remote import Remote, project_key
@@ -34,11 +34,12 @@ def connect(name: str) -> Remote:
     return remote
 
 
-def run(name: str, command: list[str], why: str | None, parent_ref: str | None) -> int:
+def run(name: str, command: list[str], why: str | None, parent_ref: str | None, data_paths: list[str] = ()) -> int:
     store = Store.find()
     parent = store.resolve(parent_ref).id if parent_ref else None
     # Runs start in the same project folder as here, so relative paths in the command still work.
     cwd = Path.cwd().resolve().relative_to(store.root.resolve()).as_posix()
+    data_files = data.collect(store.root, list(data_paths))  # bad paths fail before anything is sent
     remote = connect(name)
     try:
         say(f"getting {name} ready")
@@ -47,20 +48,24 @@ def run(name: str, command: list[str], why: str | None, parent_ref: str | None) 
         spec = env_spec(store.root, env)
         say(f"environment from {spec.source}")
         venv = remote.build_env(spec, on_line=lambda line: print(f"  {line}", file=sys.stderr))
+        project = project_key(store.root)
+        data.send(remote, remote.shared(project), data_files)
 
         # The run is recorded here, on this computer: its code, git, line and parent.
         run_dir = start_run(store, command=command, cwd=Path.cwd(), why=why, parent=parent, source="wrapper", python=None)
         write_json(run_dir / "env.json", env)  # this computer's environment, until the machine records its own
-        paths = remote.paths(project_key(store.root), run_dir.name)
-        mirror.write_state(run_dir, {"machine": name, "dir": paths.run_dir, "pidfile": paths.pidfile, "venv": venv})
+        paths = remote.paths(project, run_dir.name)
+        mirror.write_state(run_dir, {"machine": name, "dir": paths.run_dir, "work": paths.work, "pidfile": paths.pidfile,
+                                     "venv": venv})
         started = time.monotonic()
         may_be_running = False
         try:
-            files = read_json(run_dir / "files.json", {}).get("files", {})
-            shas = sorted({entry["sha"] for entry in files.values()})
+            snapshot = read_json(run_dir / "files.json", {})
+            shas = sorted({entry["sha"] for entry in snapshot.get("files", {}).values()})
             missing = remote.missing(paths.objects, shas)
             remote.send_objects(paths.objects, store.dir / "objects", missing)
             say(f"sent {len(missing)} of {len(shas)} files ({len(shas) - len(missing)} already on {name})")
+            data.warn_missing(remote, paths.shared, store.root, snapshot.get("skipped", []))
             remote.send_files(paths.run_dir, run_dir, RUN_FILES)
             remote.checkout(paths)
             may_be_running = True
@@ -104,6 +109,30 @@ def stop(ref: str) -> int:
     remote = connect(state["machine"])
     try:
         say(f"{run.id} on {state['machine']}: {remote.stop(state['pidfile'])}")
+        return 0
+    finally:
+        remote.box.close()
+
+
+def pull(ref: str, paths: list[str], to: str, force: bool) -> int:
+    store = Store.find()
+    run = store.resolve(ref)
+    state = mirror.read_state(run.dir)
+    remote = connect(state["machine"])
+    try:
+        work = data.work_dir(state)
+        if not paths:
+            outputs = remote.outputs(work, state["dir"])
+            if not outputs:
+                say(f"run {run.id[-4:]} has not written any files on {state['machine']}")
+                return 0
+            print(f"run {run.id[-4:]} wrote on {state['machine']} ({work}):")
+            for line in data.summary(outputs, data.here(store.root)):
+                print(f"  {line}")
+            print(f"bring one home with: ferry pull {run.id[-4:]} PATH [--to DIR]")
+            return 0
+        count = data.pull(remote, work, paths, Path(to), force, data.here(store.root))
+        say(f"copied {data.count_files(count)} from {state['machine']} into {Path(to).resolve()}")
         return 0
     finally:
         remote.box.close()

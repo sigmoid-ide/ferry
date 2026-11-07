@@ -12,3 +12,52 @@ connection, and copies it back into `.hunch/` while it trains. `hunch log` and t
 it like any other run.
 
 Status: early development (v0: your own machines over SSH). Part of [Sigmoid IDE](https://github.com/sigmoid-ide).
+
+## What the machine needs
+
+Linux (x86_64 or aarch64), SSH and `python3`. Nothing is installed system-wide: Ferry keeps everything in `~/.ferry`,
+including [uv](https://github.com/astral-sh/uv), which it downloads once and checks against a pinned checksum.
+
+## Running
+
+`ferry add` shows the machine's host key the first time and pins it; a changed key stops Ferry until you remove the
+old one. Ferry uses your SSH setup as it is: `~/.ssh/config`, your keys and ssh-agent. A key with a passphrase is
+asked for in the terminal.
+
+`ferry run` records the run on your computer first (code, git branch, the run it builds on), then:
+
+- builds the environment on the machine from `requirements.txt`, or else from the packages in the project's own
+  Python (an activated environment, or `.venv`), with torch matched to the machine's driver. Each environment is
+  built once and reused;
+- sends only the code files the machine does not have yet;
+- starts the run in the same project folder you started it from, so relative paths work;
+- copies the run home while it trains, and checks every file when it ends.
+
+## Data and outputs
+
+Only your code goes to the machine on its own. Send data with `--data`:
+
+```bash
+ferry run --on mybox --data data/ -- python train.py
+```
+
+Data goes into a folder the project keeps on the machine and appears in every run's folder at the same path, so
+`open("data/train.bin")` works there as it does here. It is sent once: next time only new or changed files go.
+
+What a run writes (checkpoints, plots) stays on the machine. Ferry lists it when the run ends; bring it home with:
+
+```bash
+ferry pull a7f3                       # what run a7f3 wrote
+ferry pull a7f3 checkpoints --to out/
+```
+
+## When the connection drops
+
+The run keeps going. Ctrl+C stops copying, never the run. `ferry attach a7f3` picks the copy up again,
+`ferry stop a7f3` stops the run (and everything it started; after 30 seconds it is killed), and `ferry ps` lists
+runs going on other machines. A run whose process on the machine dies without an end is marked crashed.
+
+## What stays where
+
+Nothing secret goes into `.hunch/` or to the machine: no keys, no passwords. Ferry's own settings (the machines
+you added and their host keys) are in `%APPDATA%\ferry` on Windows and `~/.config/ferry` elsewhere.

@@ -37,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--on", required=True, metavar="MACHINE", help="the machine to run on")
     run.add_argument("-m", "--why", help="why you are running this (default: $HUNCH_WHY, else asked for in a terminal)")
     run.add_argument("--from", dest="parent", metavar="RUN", help="the run this one builds on (default: the last run on this branch)")
+    run.add_argument("--data", action="append", default=[], metavar="PATH",
+                     help="a file or folder the run needs besides its code, such as a dataset; sent once, kept on the "
+                          "machine for later runs, and found at the same path there (repeatable)")
     run.add_argument("command", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     run.set_defaults(handler=cmd_run)
 
@@ -47,6 +50,13 @@ def main(argv: list[str] | None = None) -> int:
     stop = commands.add_parser("stop", help="stop a run on its machine")
     stop.add_argument("run")
     stop.set_defaults(handler=cmd_stop)
+
+    pull = commands.add_parser("pull", help="bring files a run wrote on its machine home, such as checkpoints")
+    pull.add_argument("run")
+    pull.add_argument("paths", nargs="*", metavar="PATH", help="files or folders in the run's folder (none: list them)")
+    pull.add_argument("--to", default=".", metavar="DIR", help="where to put them (default: here)")
+    pull.add_argument("--force", action="store_true", help="replace files that are already there")
+    pull.set_defaults(handler=cmd_pull)
 
     ps = commands.add_parser("ps", help="runs that are going on other machines")
     ps.set_defaults(handler=cmd_ps)
@@ -131,7 +141,7 @@ def cmd_run(args) -> int:
     if not command:
         raise FerryError("nothing to run. Usage: ferry run --on mybox -- python train.py")
     get_machine(args.on)  # fail before asking why
-    return launch.run(args.on, command, _why(args), args.parent)
+    return launch.run(args.on, command, _why(args), args.parent, args.data)
 
 
 def cmd_attach(args) -> int:
@@ -140,6 +150,10 @@ def cmd_attach(args) -> int:
 
 def cmd_stop(args) -> int:
     return launch.stop(args.run)
+
+
+def cmd_pull(args) -> int:
+    return launch.pull(args.run, args.paths, args.to, args.force)
 
 
 def cmd_ps(args) -> int:
