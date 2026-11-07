@@ -1,0 +1,46 @@
+[project]
+name = "sigmoid-ferry"
+version = "0.1.0.dev0"
+description = "Run your Hunch experiments on a GPU machine over SSH, and bring every run home."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Usmon N", email = "rainxch.dev@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "sigmoid-hunch>=0.3.1",
+    "paramiko>=5.1.0",
+]
+keywords = ["machine-learning", "gpu", "ssh", "experiment-tracking", "remote-training"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.scripts]
+ferry = "ferry.cli:main"
+
+[project.urls]
+Repository = "https://github.com/sigmoid-ide/ferry"
+Issues = "https://github.com/sigmoid-ide/ferry/issues"
+
+[build-system]
+requires = ["uv_build>=0.11.16,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "ferry"
+
+[tool.uv.sources]
+sigmoid-hunch = { path = "../hunch", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
