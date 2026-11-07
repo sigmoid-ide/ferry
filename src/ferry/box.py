@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import urllib.request
 import zlib
@@ -33,6 +34,27 @@ def _write_atomic(path, data):
     with open(tmp, "wb") as f:
         f.write(data)
     os.replace(tmp, path)
+
+
+def _alive(pidfile):
+    """Whether the supervisor named in `pidfile` still runs. A reused pid, or a finished
+    process nobody has reaped yet, does not count."""
+    try:
+        with open(pidfile) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+    except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
+        return None
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            if f.read().rsplit(")", 1)[1].split()[0] == "Z":
+                return None
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            if os.path.basename(pidfile).encode() not in f.read():
+                return None
+    except (OSError, IndexError):
+        pass  # no /proc here: trust the signal check
+    return pid
 
 
 def cmd_mkdirs(*paths):
@@ -133,6 +155,14 @@ def cmd_env(root, key, python):
 
 STARTED_MARK = ".ferry-started"
 START_WAIT_SECONDS = 60
+STOP_GRACE_SECONDS = 30  # after asking a run to stop, before killing it
+
+
+def _signal_group(pgid, signum):
+    try:
+        os.killpg(pgid, signum)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _tail(path, lines=12):
@@ -202,7 +232,9 @@ def cmd_supervise(run_dir, workdir, venv, shared, *command):
         heartbeat = Heartbeat(run / "heartbeat")
         heartbeat.start()
         log = open(run / "output.log", "ab", buffering=0)
-        proc = subprocess.Popen(list(command), cwd=workdir, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+        # Its own process group, so stopping the run reaches everything it started (data loader workers, torchrun ranks).
+        proc = subprocess.Popen(list(command), cwd=workdir, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                start_new_session=True)
         (run / STARTED_MARK).touch()
     except BaseException as e:
         sys.stderr.write("ferry: the run could not start: %r\n" % (e,))
@@ -214,9 +246,18 @@ def cmd_supervise(run_dir, workdir, venv, shared, *command):
 
     stopped = []
 
+    def kill_if_still_running():
+        try:
+            proc.wait(STOP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            _signal_group(proc.pid, signal.SIGKILL)
+
     def forward(signum, frame):
+        if stopped:
+            return
         stopped.append(signum)
-        proc.send_signal(signal.SIGTERM)
+        _signal_group(proc.pid, signal.SIGTERM)
+        threading.Thread(target=kill_if_still_running, daemon=True).start()
 
     signal.signal(signal.SIGTERM, forward)
     signal.signal(signal.SIGINT, forward)
@@ -226,6 +267,8 @@ def cmd_supervise(run_dir, workdir, venv, shared, *command):
         code = proc.wait()
     finally:
         duration = time.monotonic() - started
+        if stopped:
+            _signal_group(proc.pid, signal.SIGKILL)  # whatever the run started and left behind
         heartbeat.stop()
         if code == 0 and not stopped:
             status = "finished"
@@ -247,13 +290,9 @@ def cmd_reap(run_dir, pidfile):
     if (run / "end.json").exists():
         print("ended")
         return
-    try:
-        with open(pidfile) as f:
-            os.kill(int(f.read().strip()), 0)
+    if _alive(pidfile):
         print("alive")
         return
-    except (FileNotFoundError, ProcessLookupError, ValueError):
-        pass
     with open(run / "output.log", "ab") as f:
         f.write(b"ferry: the run's supervisor on this machine stopped without recording an end\n")
     finish_run(run, status="crashed", exit_code=None, duration=0.0)
@@ -261,23 +300,23 @@ def cmd_reap(run_dir, pidfile):
 
 
 def cmd_stop(pidfile):
-    try:
-        with open(pidfile) as f:
-            pid = int(f.read().strip())
-        os.kill(pid, signal.SIGTERM)
-    except (FileNotFoundError, ProcessLookupError, ValueError):
+    """Asks the run to stop and waits until it has, or until it is killed."""
+    pid = _alive(pidfile)
+    if pid is None:
         print("not running")
         return
-    print("stopping")
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + STOP_GRACE_SECONDS + 10
+    while time.monotonic() < deadline:
+        if not _alive(pidfile):
+            print("stopped")
+            return
+        time.sleep(0.5)
+    print("still stopping")
 
 
 def cmd_alive(pidfile):
-    try:
-        with open(pidfile) as f:
-            os.kill(int(f.read().strip()), 0)
-        print("yes")
-    except (FileNotFoundError, ProcessLookupError, ValueError, PermissionError):
-        print("no")
+    print("yes" if _alive(pidfile) else "no")
 
 
 def cmd_hash(run_dir):
