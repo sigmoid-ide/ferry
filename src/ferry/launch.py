@@ -7,11 +7,11 @@ import time
 from pathlib import Path
 
 from hunch.capture import capture_env, start_run
-from hunch.store import Store, append_jsonl, finish_run, read_json, timestamp
+from hunch.store import Store, append_jsonl, finish_run, read_json, timestamp, write_json
 
 from . import mirror
 from .config import FerryError, get_machine
-from .envspec import env_spec
+from .envspec import env_spec, local_python
 from .remote import Remote, project_key
 from .ssh import Box
 
@@ -41,12 +41,14 @@ def run(name: str, command: list[str], why: str | None, parent_ref: str | None) 
     try:
         say(f"getting {name} ready")
         remote.install_uv()
-        spec = env_spec(store.root, capture_env(None))
+        env = capture_env(local_python(store.root, command))
+        spec = env_spec(store.root, env)
         say(f"environment from {spec.source}")
         venv = remote.build_env(spec, on_line=lambda line: print(f"  {line}", file=sys.stderr))
 
         # The run is recorded here, on this computer: its code, git, line and parent.
         run_dir = start_run(store, command=command, cwd=Path.cwd(), why=why, parent=parent, source="wrapper", python=None)
+        write_json(run_dir / "env.json", env)  # this computer's environment, until the machine records its own
         paths = remote.paths(project_key(store.root), run_dir.name)
         mirror.write_state(run_dir, {"machine": name, "dir": paths.run_dir, "pidfile": paths.pidfile, "venv": venv})
         started = time.monotonic()

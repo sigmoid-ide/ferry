@@ -49,3 +49,21 @@ def test_targets_and_project_keys():
     assert _parse_target("me@gpu.lab:2222") == ("gpu.lab", "me", 2222)
     assert _parse_target("gpu-box") == ("gpu-box", None, None)
     assert project_key(__import__("pathlib").Path("My Project")).startswith("My-Project-")
+
+
+def test_the_projects_own_python_is_read_never_ferrys(tmp_path, monkeypatch):
+    from ferry.envspec import local_python
+
+    venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    assert local_python(tmp_path, ["python", "train.py"]) == str(venv_python)
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "activated"))  # an activated environment wins
+    monkeypatch.setattr("shutil.which", lambda name: str(tmp_path / "activated" / "bin" / name))
+    assert local_python(tmp_path, ["python", "train.py"]) == str(tmp_path / "activated" / "bin" / "python")
+
+
+def test_an_unreadable_python_without_requirements_says_what_to_do(tmp_path):
+    with pytest.raises(FerryError, match="requirements.txt"):
+        env_spec(tmp_path, {"executable": "python", "error": "not found"})
