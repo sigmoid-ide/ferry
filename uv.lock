@@ -370,7 +370,7 @@ wheels = [
 
 [[package]]
 name = "sigmoid-ferry"
-version = "0.1.0.dev0"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "paramiko" },
@@ -385,7 +385,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "paramiko", specifier = ">=5.1.0" },
-    { name = "sigmoid-hunch", editable = "../hunch" },
+    { name = "sigmoid-hunch", specifier = ">=0.4.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -393,13 +393,9 @@ dev = [{ name = "pytest", specifier = ">=9.2.0" }]
 
 [[package]]
 name = "sigmoid-hunch"
-version = "0.3.1"
-source = { editable = "../hunch" }
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "ipython", specifier = ">=9.18.1" },
-    { name = "pytest", specifier = ">=9.2.0" },
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/74/a8/7765b0db5339d42a512bc68ddc2fb5a2ee20797b9d21ecf9785ca7c71d3d/sigmoid_hunch-0.4.0.tar.gz", hash = "sha256:8be858d93ee0652b4e02222868705b8c208cfd31ffc16071a803b135d6411cc5", size = 37260, upload-time = "2026-11-07T13:21:09.902Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/53/3b/d6e10e988342c6b1ca90ac277a966e1bbae235c6c8286feff9987b40e919/sigmoid_hunch-0.4.0-py3-none-any.whl", hash = "sha256:9d12050ddc73731be47f453e3753e84a197d34ea884d45c6c9de8f85c13e50d8", size = 43032, upload-time = "2026-11-07T13:21:08.933Z" },
 ]

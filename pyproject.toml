@@ -1,6 +1,6 @@
 [project]
 name = "sigmoid-ferry"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Run your Hunch experiments on a GPU machine over SSH, and bring every run home."
 readme = "README.md"
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "sigmoid-hunch>=0.3.1",
+    "sigmoid-hunch>=0.4.0",
     "paramiko>=5.1.0",
 ]
 keywords = ["machine-learning", "gpu", "ssh", "experiment-tracking", "remote-training"]
@@ -36,9 +36,6 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "ferry"
-
-[tool.uv.sources]
-sigmoid-hunch = { path = "../hunch", editable = true }
 
 [dependency-groups]
 dev = [

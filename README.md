@@ -11,7 +11,15 @@ Ferry sends your code to the machine, builds the environment there, starts the r
 connection, and copies it back into `.hunch/` while it trains. `hunch log` and the PyCharm and VS Code plugins show
 it like any other run.
 
-Status: early development (v0: your own machines over SSH). Part of [Sigmoid IDE](https://github.com/sigmoid-ide).
+Status: 0.1, for your own machines over SSH. Part of [Sigmoid IDE](https://github.com/sigmoid-ide).
+
+## Install
+
+```bash
+pip install sigmoid-ferry
+```
+
+That gives you the `ferry` command, with Hunch. It also installs as a tool of its own: `uv tool install sigmoid-ferry`.
 
 ## What the machine needs
 
