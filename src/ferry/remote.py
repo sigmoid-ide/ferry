@@ -183,6 +183,10 @@ class Remote:
     def alive(self, pidfile: str) -> bool:
         return self.call("alive", pidfile).strip() == "yes"
 
+    def states(self, runs: list[list[str]]) -> list[str]:
+        """How each run ([run_dir, pidfile]) is: running, ended, gone (stopped without an end) or missing."""
+        return json.loads(self.call("states", stdin=json.dumps(runs).encode()))
+
     def hashes(self, run_dir: str) -> dict[str, str]:
         return json.loads(self.call("hash", run_dir))
 

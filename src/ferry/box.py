@@ -405,6 +405,20 @@ def cmd_alive(pidfile):
     print("yes" if _alive(pidfile) else "no")
 
 
+def cmd_states():
+    """Reads [[run_dir, pidfile], ...] on stdin and prints how each run is, as JSON:
+    "running", "ended", "gone" (its supervisor stopped without an end) or "missing"."""
+    out = []
+    for run_dir, pidfile in json.load(sys.stdin):
+        if not os.path.isdir(run_dir):
+            out.append("missing")
+        elif os.path.exists(os.path.join(run_dir, "end.json")):
+            out.append("ended")
+        else:
+            out.append("running" if _alive(pidfile) else "gone")
+    print(json.dumps(out))
+
+
 def cmd_hash(run_dir):
     """Checksums of a run's files, so the copy at home can be checked."""
     out = {}
@@ -465,6 +479,7 @@ COMMANDS = {
     "supervise": cmd_supervise,
     "stop": cmd_stop,
     "alive": cmd_alive,
+    "states": cmd_states,
     "reap": cmd_reap,
     "hash": cmd_hash,
     "now": cmd_now,

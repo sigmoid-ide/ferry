@@ -26,6 +26,7 @@ from .config import FerryError
 from .remote import Remote
 
 REMOTE_FILE = "remote.json"
+GONE_FILE = "remote.gone.json"  # remote.json, set aside by `ferry forget`; the next copy puts it back
 APPEND = ("metrics.jsonl", "notes.jsonl", "output.log")
 WHOLE = ("run.json", "files.json", "config.json", "env.json", "summary.json", "end.json")
 POLL_SECONDS = 2.0
@@ -38,10 +39,11 @@ def _iso(ts: float) -> str:
 
 def write_state(run_dir: Path, state: dict) -> None:
     write_json(run_dir / REMOTE_FILE, state)
+    (run_dir / GONE_FILE).unlink(missing_ok=True)
 
 
 def read_state(run_dir: Path) -> dict:
-    state = read_json(run_dir / REMOTE_FILE)
+    state = read_json(run_dir / REMOTE_FILE) or read_json(run_dir / GONE_FILE)
     if state is None:
         raise FerryError(f"{run_dir.name} did not run on another machine")
     return state
@@ -108,6 +110,15 @@ def verify(remote: Remote, state: dict, run_dir: Path) -> list[str]:
         if not local.exists() or hashlib.sha256(local.read_bytes()).hexdigest() != digest:
             differ.append(name)
     return differ
+
+
+def being_copied(run_dir: Path) -> bool:
+    """Whether a ferry is copying this run home right now."""
+    try:
+        with _CopyLock(run_dir):
+            return False
+    except FerryError:
+        return True
 
 
 class _CopyLock:
@@ -202,6 +213,10 @@ def _follow(remote: Remote, run_dir: Path, echo_output: bool) -> int:
                     if verdict == "reaped":
                         print(f"\nferry: the run stopped on {label} without recording an end; marked it crashed.", file=sys.stderr)
                         continue
+            except FileNotFoundError:  # the connection is fine, the run's folder is not there
+                short = run_dir.name[-4:]
+                raise FerryError(f"run {short} is no longer on {label}. If it is gone for good, "
+                                 f"`ferry forget {short}` marks it lost") from None
             except (OSError, EOFError, paramiko.SSHException, FerryError) as e:
                 failures += 1
                 wait = min(60, 2 ** failures)

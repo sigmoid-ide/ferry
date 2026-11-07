@@ -8,9 +8,9 @@ import re
 import sys
 
 import paramiko
-from hunch.store import HunchError, Store
+from hunch.store import HunchError
 
-from . import __version__, launch, mirror
+from . import __version__, launch
 from .config import FerryError, Machine, can_ask, get_machine, load_machines, save_machine
 from .remote import Remote
 from .ssh import Box
@@ -64,8 +64,12 @@ def main(argv: list[str] | None = None) -> int:
     pull.add_argument("--force", action="store_true", help="replace files that are already there")
     pull.set_defaults(handler=cmd_pull)
 
-    ps = commands.add_parser("ps", help="runs that are going on other machines")
+    ps = commands.add_parser("ps", help="runs that are going on other machines, and how they are doing there")
     ps.set_defaults(handler=cmd_ps)
+
+    forget = commands.add_parser("forget", help="for a run whose machine is gone for good: show it as lost")
+    forget.add_argument("run")
+    forget.set_defaults(handler=cmd_forget)
 
     args = parser.parse_args(argv)
     try:
@@ -164,15 +168,8 @@ def cmd_pull(args) -> int:
 
 
 def cmd_ps(args) -> int:
-    store = Store.find()
-    found = 0
-    for run in store.runs():
-        path = run.dir / mirror.REMOTE_FILE
-        if not path.exists() or run.end is not None:
-            continue
-        state = mirror.read_state(run.dir)
-        found += 1
-        print(f"{run.id[-4:]}  on {state.get('machine')}  synced {state.get('synced_at') or 'never'}  {run.why or ''}".rstrip())
-    if not found:
-        print("no runs going on other machines")
-    return 0
+    return launch.ps()
+
+
+def cmd_forget(args) -> int:
+    return launch.forget(args.run)

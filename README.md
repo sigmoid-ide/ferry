@@ -67,8 +67,10 @@ ferry pull a7f3 checkpoints --to out/
 ## When the connection drops
 
 The run keeps going. Ctrl+C stops copying, never the run. `ferry attach a7f3` picks the copy up again,
-`ferry stop a7f3` stops the run (and everything it started; after 30 seconds it is killed), and `ferry ps` lists
-runs going on other machines. A run whose process on the machine dies without an end is marked crashed.
+`ferry stop a7f3` stops the run (and everything it started; after 30 seconds it is killed), and `ferry ps` asks each
+machine how its runs are doing. A run whose process on the machine dies without an end is marked crashed. If a
+machine is gone for good, `ferry forget a7f3` stops counting its run as running, and Hunch shows it as lost; should the
+machine come back, `ferry attach a7f3` picks the run up again.
 
 ## What stays where
 

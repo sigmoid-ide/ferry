@@ -8,8 +8,9 @@ import sys
 import time
 from pathlib import Path
 
+import paramiko
 from hunch.capture import capture_env, start_run
-from hunch.store import Store, append_jsonl, finish_run, read_json, timestamp, write_json
+from hunch.store import LOST_AFTER_SECONDS, Store, append_jsonl, finish_run, read_json, timestamp, write_json
 
 from . import data, mirror
 from .config import FerryError, get_machine
@@ -195,3 +196,68 @@ def pull(ref: str, paths: list[str], to: str, force: bool) -> int:
         return 0
     finally:
         remote.box.close()
+
+
+STATE_TEXT = {
+    "ended": ("ended on {machine}", "ferry attach {short} brings the rest home"),
+    "gone": ("stopped on {machine} without recording an end", "ferry attach {short} marks it crashed"),
+    "missing": ("no longer on {machine}", "if it is gone for good, ferry forget {short} marks it lost"),
+}
+
+
+def ps() -> int:
+    """Asks each machine how its runs are doing."""
+    store = Store.find()
+    away: dict[str, list] = {}
+    for run in store.runs():
+        if run.end is None and (run.dir / mirror.REMOTE_FILE).exists():
+            state = mirror.read_state(run.dir)
+            away.setdefault(state.get("machine", "?"), []).append((run, state))
+    if not away:
+        print("no runs going on other machines")
+        return 0
+    for machine, runs in away.items():
+        states, problem = None, None
+        try:
+            remote = connect(machine)
+            try:
+                states = remote.states([[state["dir"], state["pidfile"]] for _, state in runs])
+            finally:
+                remote.box.close()
+        except (FerryError, OSError, paramiko.SSHException) as e:
+            problem = e
+        for i, (run, _) in enumerate(runs):
+            short = run.id[-4:]
+            if states is None:
+                what, hint = f"on {machine}, which cannot be reached ({problem})", f"if it is gone for good, ferry forget {short} marks it lost"
+            elif states[i] == "running":
+                copied = mirror.being_copied(run.dir)
+                what = f"running on {machine}" + (", being copied home" if copied else "")
+                hint = None if copied else f"ferry attach {short} copies it home"
+            else:
+                what, hint = (text.format(machine=machine, short=short) for text in STATE_TEXT[states[i]])
+            print(f"{short}  {what}" + (f"  {run.why}" if run.why else ""))
+            if hint:
+                print(f"      {hint}")
+    return 0
+
+
+def forget(ref: str) -> int:
+    """For a run whose machine is gone for good: it stops counting as running and shows
+    as lost, as Hunch shows any run that never recorded an end."""
+    store = Store.find()
+    run = store.resolve(ref)
+    short = run.id[-4:]
+    if run.end is not None or not (run.dir / mirror.REMOTE_FILE).exists():
+        raise FerryError(f"run {short} is not going on another machine; there is nothing to forget")
+    if mirror.being_copied(run.dir):
+        raise FerryError(f"a ferry is copying run {short} right now, so its machine is there. Stop that one first")
+    machine = mirror.read_state(run.dir).get("machine")
+    os.replace(run.dir / mirror.REMOTE_FILE, run.dir / mirror.GONE_FILE)
+    # The last sign of life copied here no longer counts: the machine is gone.
+    beat = run.dir / "heartbeat"
+    beat.touch()
+    stale = time.time() - LOST_AFTER_SECONDS - 1
+    os.utime(beat, (stale, stale))
+    say(f"run {short} shows as lost now. If {machine} comes back, `ferry attach {short}` picks it up again")
+    return 0
