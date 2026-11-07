@@ -40,6 +40,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--data", action="append", default=[], metavar="PATH",
                      help="a file or folder the run needs besides its code, such as a dataset; sent once, kept on the "
                           "machine for later runs, and found at the same path there (repeatable)")
+    run.add_argument("--env", action="append", default=[], metavar="NAME[=VALUE]",
+                     help="an environment variable for the run, such as a token. NAME alone sends its value from here, "
+                          "so it is never typed out. Handed to the run in memory, never saved in a file (repeatable)")
+    run.add_argument("--gpus", metavar="LIST",
+                     help="the machine's GPUs the run may use, numbered as nvidia-smi shows them, such as 1 or 0,1 "
+                          "(default: all)")
     run.add_argument("command", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     run.set_defaults(handler=cmd_run)
 
@@ -141,7 +147,8 @@ def cmd_run(args) -> int:
     if not command:
         raise FerryError("nothing to run. Usage: ferry run --on mybox -- python train.py")
     get_machine(args.on)  # fail before asking why
-    return launch.run(args.on, command, _why(args), args.parent, args.data)
+    env = launch.run_env(args.env, args.gpus)
+    return launch.run(args.on, command, _why(args), args.parent, args.data, env)
 
 
 def cmd_attach(args) -> int:

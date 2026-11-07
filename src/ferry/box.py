@@ -256,9 +256,13 @@ def _tail(path, lines=12):
 
 def cmd_start(run_dir, workdir, venv, shared, pidfile, *command):
     """Starts the supervisor in its own session, so it outlives the SSH connection,
-    and waits until it has really started the command, or reports why it did not."""
+    and waits until it has really started the command, or reports why it did not.
+    Variables for the run (tokens, the GPUs to use) arrive as JSON on stdin and are
+    handed over in memory, never written to a file."""
     if command[:1] == ("--",):
         command = command[1:]
+    env = dict(os.environ)
+    env.update(json.loads(sys.stdin.read() or "{}"))
     os.makedirs(os.path.dirname(pidfile), exist_ok=True)
     os.makedirs(shared, exist_ok=True)
     os.makedirs(workdir, exist_ok=True)  # a subfolder the code has no files in
@@ -266,7 +270,7 @@ def cmd_start(run_dir, workdir, venv, shared, pidfile, *command):
     log = open(log_path, "ab")
     proc = subprocess.Popen(
         [os.path.join(venv, "bin", "python"), os.path.abspath(__file__), "supervise", run_dir, workdir, venv, shared, "--", *command],
-        cwd=workdir, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True,
+        cwd=workdir, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True,
     )
     with open(pidfile, "w") as f:
         f.write(str(proc.pid))
@@ -419,6 +423,35 @@ def cmd_now():
     print("%.3f" % time.time())
 
 
+def _nvidia_smi(query, fields):
+    env = dict(os.environ)
+    env["PATH"] = _with_gpu_tools(env.get("PATH", ""))
+    try:
+        proc = subprocess.run(["nvidia-smi", query, "--format=csv,noheader,nounits"], env=env, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    rows = (line.split(",", fields - 1) for line in proc.stdout.decode("utf-8", "replace").splitlines())
+    return [[part.strip() for part in row] for row in rows if len(row) == fields]
+
+
+def cmd_gpus():
+    """Prints the NVIDIA GPUs as JSON: index, name, memory and how much of it other
+    programs already compute with (MiB). An empty list without nvidia-smi."""
+    gpus, by_uuid = [], {}
+    for index, uuid, memory, name in _nvidia_smi("--query-gpu=index,uuid,memory.total,name", 4):
+        if index.isdigit() and memory.isdigit():
+            gpu = {"index": int(index), "name": name, "memory": int(memory), "busy": 0}
+            gpus.append(gpu)
+            by_uuid[uuid] = gpu
+    for uuid, used in _nvidia_smi("--query-compute-apps=gpu_uuid,used_memory", 2):
+        if uuid in by_uuid and used.isdigit():
+            by_uuid[uuid]["busy"] += int(used)
+    print(json.dumps(gpus))
+
+
 COMMANDS = {
     "mkdirs": cmd_mkdirs,
     "missing": cmd_missing,
@@ -435,6 +468,7 @@ COMMANDS = {
     "reap": cmd_reap,
     "hash": cmd_hash,
     "now": cmd_now,
+    "gpus": cmd_gpus,
 }
 
 if __name__ == "__main__":

@@ -33,6 +33,19 @@ asked for in the terminal.
 - starts the run in the same project folder you started it from, so relative paths work;
 - copies the run home while it trains, and checks every file when it ends.
 
+## Tokens and GPUs
+
+Give a run what it needs from your environment with `--env`, and pick its GPUs with `--gpus`:
+
+```bash
+ferry run --on mybox --env HF_TOKEN --env WANDB_MODE=offline --gpus 1 -- python train.py
+```
+
+`--env NAME` sends the value `NAME` has here, so a token is never typed out or left in your shell history. It is
+handed to the run in memory and never saved in a file, on the machine or in `.hunch/`. `--gpus` takes the numbers
+`nvidia-smi` shows. Ferry refuses a GPU the machine does not have, which CUDA would answer by quietly running on the
+CPU, and says when another program already uses a GPU the run gets.
+
 ## Data and outputs
 
 Only your code goes to the machine on its own. Send data with `--data`:
@@ -59,5 +72,6 @@ runs going on other machines. A run whose process on the machine dies without an
 
 ## What stays where
 
-Nothing secret goes into `.hunch/` or to the machine: no keys, no passwords. Ferry's own settings (the machines
+Nothing secret goes into `.hunch/` or to the machine: no keys, no passwords. Tokens passed with `--env` exist only in
+the run's memory. Ferry's own settings (the machines
 you added and their host keys) are in `%APPDATA%\ferry` on Windows and `~/.config/ferry` elsewhere.

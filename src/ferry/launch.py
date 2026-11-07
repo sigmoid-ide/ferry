@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -16,10 +18,64 @@ from .remote import Remote, project_key
 from .ssh import Box
 
 RUN_FILES = ["run.json", "files.json", "config.json", "env.json"]
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+GPU_LIST = re.compile(r"\d+(,\d+)*")
+FERRY_SETS = ("PATH", "VIRTUAL_ENV", "HUNCH_RUN_DIR", "FERRY_SHARED")  # the run's environment Ferry sets itself
 
 
 def say(text: str) -> None:
     print(f"ferry: {text}", file=sys.stderr)
+
+
+def run_env(specs: list[str], gpus: str | None = None) -> dict[str, str]:
+    """The variables the run gets on the machine, from --env NAME[=VALUE] and --gpus.
+    NAME alone takes the value from this computer, so a token is never typed out.
+    Errors name the variable, never its value."""
+    env: dict[str, str] = {}
+    for spec in specs:
+        name, has_value, value = spec.partition("=")
+        if not ENV_NAME.fullmatch(name):
+            raise FerryError(f"--env {name!r}: give NAME, to send its value from here, or NAME=VALUE")
+        if name in FERRY_SETS:
+            raise FerryError(f"--env {name}: Ferry sets {name} for the run itself")
+        if not has_value:
+            if name not in os.environ:
+                raise FerryError(f"--env {name}: {name} is not set here. Set it first, or give --env {name}=VALUE")
+            value = os.environ[name]
+        env[name] = value
+    if gpus is not None:
+        if not GPU_LIST.fullmatch(gpus):
+            raise FerryError(f"--gpus {gpus!r}: give GPU numbers as nvidia-smi shows them, such as 1 or 0,1")
+        if "CUDA_VISIBLE_DEVICES" in env:
+            raise FerryError("give --gpus or --env CUDA_VISIBLE_DEVICES, not both")
+        env["CUDA_VISIBLE_DEVICES"] = gpus
+        env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")  # so CUDA numbers the GPUs as nvidia-smi does
+    return env
+
+
+def check_gpus(name: str, gpus: list[dict], wanted: str | None) -> None:
+    """Refuses GPU numbers the machine does not have, which CUDA would quietly answer by
+    running on the CPU, and warns when another program already computes on a GPU the
+    run gets."""
+    by_index = {gpu["index"]: gpu for gpu in gpus}
+    if wanted is not None and not GPU_LIST.fullmatch(wanted):
+        return  # GPU ids, or none at all: nothing to check against these numbers
+    if wanted is not None:
+        if not gpus:
+            raise FerryError(f"{name} has no NVIDIA GPU that nvidia-smi can see, so there is nothing to pick with --gpus")
+        for index in map(int, wanted.split(",")):
+            if index not in by_index:
+                have = ", ".join(f"{gpu['index']} ({gpu['name']})" for gpu in gpus)
+                raise FerryError(f"{name} has no GPU {index}. Its GPUs: {have}")
+        chosen = [by_index[int(i)] for i in wanted.split(",")]
+    else:
+        chosen = gpus
+    free = [gpu["index"] for gpu in gpus if not gpu["busy"]]
+    for gpu in chosen:
+        if gpu["busy"]:
+            hint = f"; GPU {free[0]} is free: --gpus {free[0]}" if free else "; the run may run out of memory or go slower"
+            say(f"GPU {gpu['index']} on {name} is already in use by another program "
+                f"({gpu['busy'] / 1024:.1f} of {gpu['memory'] / 1024:.1f} GB){hint}")
 
 
 def connect(name: str) -> Remote:
@@ -34,7 +90,9 @@ def connect(name: str) -> Remote:
     return remote
 
 
-def run(name: str, command: list[str], why: str | None, parent_ref: str | None, data_paths: list[str] = ()) -> int:
+def run(name: str, command: list[str], why: str | None, parent_ref: str | None, data_paths: list[str] = (),
+        env_vars: dict[str, str] | None = None) -> int:
+    env_vars = env_vars or {}
     store = Store.find()
     parent = store.resolve(parent_ref).id if parent_ref else None
     # Runs start in the same project folder as here, so relative paths in the command still work.
@@ -43,6 +101,7 @@ def run(name: str, command: list[str], why: str | None, parent_ref: str | None, 
     remote = connect(name)
     try:
         say(f"getting {name} ready")
+        check_gpus(name, remote.gpus(), env_vars.get("CUDA_VISIBLE_DEVICES"))
         remote.install_uv()
         env = capture_env(local_python(store.root, command))
         spec = env_spec(store.root, env)
@@ -69,7 +128,7 @@ def run(name: str, command: list[str], why: str | None, parent_ref: str | None, 
             remote.send_files(paths.run_dir, run_dir, RUN_FILES)
             remote.checkout(paths)
             may_be_running = True
-            remote.start(paths, venv, command, cwd)
+            remote.start(paths, venv, command, cwd, env_vars)
         except BaseException as e:
             if may_be_running and not isinstance(e, FerryError):
                 # Cut off while the machine was starting it: it may well be going. Keep it, and say how to find out.

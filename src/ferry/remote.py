@@ -161,11 +161,17 @@ class Remote:
     def checkout(self, paths: RunPaths) -> None:
         self.call("checkout", paths.objects, f"{paths.run_dir}/files.json", paths.work, paths.shared)
 
-    def start(self, paths: RunPaths, venv: str, command: list[str], cwd: str = ".") -> int:
-        """Starts the run in `cwd`, the project-relative folder it was launched from here."""
+    def start(self, paths: RunPaths, venv: str, command: list[str], cwd: str = ".", env: dict[str, str] | None = None) -> int:
+        """Starts the run in `cwd`, the project-relative folder it was launched from here,
+        with `env` added to its environment. `env` goes over stdin, never on a command line."""
         workdir = paths.work if cwd in ("", ".") else f"{paths.work}/{cwd}"
-        out = self.call("start", paths.run_dir, workdir, venv, paths.shared, paths.pidfile, "--", *command)
+        out = self.call("start", paths.run_dir, workdir, venv, paths.shared, paths.pidfile, "--", *command,
+                        stdin=json.dumps(env or {}).encode())
         return int(out.strip().splitlines()[-1])
+
+    def gpus(self) -> list[dict]:
+        """The machine's NVIDIA GPUs: index, name, memory and how much of it other programs use (MiB)."""
+        return json.loads(self.call("gpus"))
 
     def stop(self, pidfile: str) -> str:
         return self.call("stop", pidfile).strip()
