@@ -143,8 +143,10 @@ class Remote:
     def checkout(self, paths: RunPaths) -> None:
         self.call("checkout", paths.objects, f"{paths.run_dir}/files.json", paths.work)
 
-    def start(self, paths: RunPaths, venv: str, command: list[str]) -> int:
-        out = self.call("start", paths.run_dir, paths.work, venv, paths.shared, paths.pidfile, "--", *command)
+    def start(self, paths: RunPaths, venv: str, command: list[str], cwd: str = ".") -> int:
+        """Starts the run in `cwd`, the project-relative folder it was launched from here."""
+        workdir = paths.work if cwd in ("", ".") else f"{paths.work}/{cwd}"
+        out = self.call("start", paths.run_dir, workdir, venv, paths.shared, paths.pidfile, "--", *command)
         return int(out.strip().splitlines()[-1])
 
     def stop(self, pidfile: str) -> str:

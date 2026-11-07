@@ -37,6 +37,8 @@ def connect(name: str) -> Remote:
 def run(name: str, command: list[str], why: str | None, parent_ref: str | None) -> int:
     store = Store.find()
     parent = store.resolve(parent_ref).id if parent_ref else None
+    # Runs start in the same project folder as here, so relative paths in the command still work.
+    cwd = Path.cwd().resolve().relative_to(store.root.resolve()).as_posix()
     remote = connect(name)
     try:
         say(f"getting {name} ready")
@@ -62,7 +64,7 @@ def run(name: str, command: list[str], why: str | None, parent_ref: str | None) 
             remote.send_files(paths.run_dir, run_dir, RUN_FILES)
             remote.checkout(paths)
             may_be_running = True
-            remote.start(paths, venv, command)
+            remote.start(paths, venv, command, cwd)
         except BaseException as e:
             if may_be_running and not isinstance(e, FerryError):
                 # Cut off while the machine was starting it: it may well be going. Keep it, and say how to find out.

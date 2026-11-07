@@ -150,6 +150,7 @@ def cmd_start(run_dir, workdir, venv, shared, pidfile, *command):
         command = command[1:]
     os.makedirs(os.path.dirname(pidfile), exist_ok=True)
     os.makedirs(shared, exist_ok=True)
+    os.makedirs(workdir, exist_ok=True)  # a subfolder the code has no files in
     log_path = os.path.join(run_dir, "output.log")
     log = open(log_path, "ab")
     proc = subprocess.Popen(
