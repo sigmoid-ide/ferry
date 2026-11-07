@@ -8,10 +8,13 @@ trusted only when the user says so, and a changed key stops everything. Jump hos
 from __future__ import annotations
 
 import base64
+import errno
 import getpass
 import hashlib
 import logging
 import os
+import selectors
+import socket
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -21,9 +24,61 @@ import paramiko
 from .config import FerryError, Machine, can_ask, known_hosts_path, parse_target
 
 MAX_JUMPS = 8  # more hops than this is a ProxyJump that leads back to itself
+CONNECT_TIMEOUT = 15  # seconds to reach the machine, then for its SSH banner and the login each
+STAGGER_SECONDS = 0.25  # before trying a host's next address alongside one that has not answered yet
+_IN_PROGRESS = {0, errno.EINPROGRESS, errno.EWOULDBLOCK, getattr(errno, "WSAEWOULDBLOCK", errno.EWOULDBLOCK)}
 
 # Ferry says what went wrong in its own words; paramiko's log lines would only repeat it, raw.
 logging.getLogger("paramiko").addHandler(logging.NullHandler())
+
+
+def connect_first(host: str, port: int, timeout: float = CONNECT_TIMEOUT, addresses: list | None = None) -> socket.socket:
+    """A connection to the first of the host's addresses that answers. A name can have an
+    address that never answers, such as localhost's ::1 on a WSL machine, and paramiko
+    would wait for it and give up. So, as OpenSSH and browsers do (RFC 8305), each next
+    address is tried a quarter second after the one before, and the first to connect wins.
+    `addresses` (getaddrinfo's results) is for tests."""
+    queue = list(addresses if addresses is not None else socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+    deadline = time.monotonic() + timeout
+    selector = selectors.DefaultSelector()  # on Windows it also reports a failed connect as writable
+    waiting: dict[socket.socket, str] = {}
+    errors: list[str] = []
+    next_start = 0.0
+    try:
+        while queue or waiting:
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            if queue and (now >= next_start or not waiting):
+                family, kind, proto, _, address = queue.pop(0)
+                sock = socket.socket(family, kind, proto)
+                sock.setblocking(False)
+                code = sock.connect_ex(address)
+                if code not in _IN_PROGRESS:
+                    errors.append(f"{address[0]}: {errno.errorcode.get(code, code)}")
+                    sock.close()
+                    continue
+                waiting[sock] = address[0]
+                selector.register(sock, selectors.EVENT_WRITE)
+                next_start = now + STAGGER_SECONDS
+                continue
+            until = min(deadline, next_start) if queue else deadline
+            for key, _ in selector.select(max(until - now, 0)):
+                sock = key.fileobj
+                selector.unregister(sock)
+                name = waiting.pop(sock)
+                code = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                if code == 0:
+                    sock.setblocking(True)
+                    return sock
+                errors.append(f"{name}: {errno.errorcode.get(code, code)}")
+                sock.close()
+        silent = [f"{name}: no answer in {timeout:g}s" for name in waiting.values()]
+        raise OSError("; ".join(errors + silent) or f"{host} has no address")
+    finally:
+        selector.close()
+        for sock in waiting:
+            sock.close()
 
 
 def fingerprint(key: paramiko.PKey) -> str:
@@ -128,18 +183,18 @@ class Box:
             username=self.user,
             key_filename=self.keys or None,
             passphrase=self._passphrase,
-            timeout=15,
-            banner_timeout=15,
-            auth_timeout=15,
+            timeout=CONNECT_TIMEOUT,
+            banner_timeout=CONNECT_TIMEOUT,
+            auth_timeout=CONNECT_TIMEOUT,
             allow_agent=True,
             look_for_keys=True,
-            sock=self._tunnel(trust),
+            sock=self._socket(trust),
         )
         client.get_transport().set_keepalive(30)
 
-    def _tunnel(self, trust):
-        """The way to the machine when it is not reached directly: through the last jump
-        host (which reaches its own jump hosts the same way), or a ProxyCommand."""
+    def _socket(self, trust):
+        """The way to the machine: through the last jump host (which reaches its own jump
+        hosts the same way), a ProxyCommand, or directly to the first of its addresses that answers."""
         if self.jump:
             if self.depth >= MAX_JUMPS:
                 raise FerryError(f"the ProxyJump for {self.top.label} in ~/.ssh/config leads back to itself")
@@ -158,7 +213,7 @@ class Box:
                 raise FerryError(f"{self.label} is reached through a ProxyCommand in ~/.ssh/config, which Ferry cannot "
                                  f"run on Windows yet. A ProxyJump line works")
             return paramiko.ProxyCommand(self.proxy_command)
-        return None
+        return connect_first(self.hostname, self.port)
 
     def run(self, command: str, stdin: bytes | None = None, on_line: Callable[[str], None] | None = None,
             timeout: float = 300) -> tuple[int, bytes, bytes]:

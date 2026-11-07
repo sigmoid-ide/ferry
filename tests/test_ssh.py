@@ -1,11 +1,13 @@
-"""Jump hosts come from ~/.ssh/config as OpenSSH reads them, hop by hop."""
+"""Reaching a machine: jump hosts from ~/.ssh/config, hop by hop, and the first of its addresses that answers."""
 
 import os
+import socket
+import time
 
 import pytest
 
 from ferry.config import FerryError, Machine
-from ferry.ssh import Box
+from ferry.ssh import Box, connect_first
 
 
 @pytest.fixture
@@ -48,3 +50,44 @@ def test_a_proxycommand_on_windows_says_to_use_proxyjump(ssh_config):
     ssh_config("Host gpu\n  ProxyCommand ssh -W %h:%p bastion\n")
     with pytest.raises(FerryError, match="A ProxyJump line works"):
         Box(Machine(name="gpu", host="gpu")).connect()
+
+
+def listening():
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    return server
+
+
+def closed_port():
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+def at(host, port):
+    return (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (host, port))
+
+
+def test_an_address_that_refuses_or_hangs_does_not_stop_the_next():
+    server = listening()
+    port = server.getsockname()[1]
+    try:
+        sock = connect_first("box", port, addresses=[at("127.0.0.1", closed_port()), at("127.0.0.1", port)])
+        assert sock.getpeername()[1] == port
+        sock.close()
+        # 192.0.2.1 is for documentation only: it never answers (or is unreachable at once).
+        started = time.monotonic()
+        sock = connect_first("box", port, timeout=5, addresses=[at("192.0.2.1", 22), at("127.0.0.1", port)])
+        assert sock.getpeername()[1] == port
+        assert time.monotonic() - started < 2  # a quarter second, not the whole timeout
+        sock.close()
+    finally:
+        server.close()
+
+
+def test_when_no_address_answers_each_says_why():
+    with pytest.raises(OSError, match="127.0.0.1"):
+        connect_first("box", 22, timeout=2, addresses=[at("127.0.0.1", closed_port())])
