@@ -22,6 +22,14 @@ import zlib
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 ENV_MARK = "FERRY-ENV: "
+WSL_GPU_TOOLS = "/usr/lib/wsl/lib"  # nvidia-smi on WSL; an SSH session's PATH lacks it
+
+
+def _with_gpu_tools(path):
+    """PATH with WSL's GPU tools, so uv picks a CUDA torch and nvidia-smi works there too."""
+    if os.path.isdir(WSL_GPU_TOOLS) and WSL_GPU_TOOLS not in path.split(os.pathsep):
+        return path + os.pathsep + WSL_GPU_TOOLS
+    return path
 
 
 def _object_path(objects, sha):
@@ -148,6 +156,7 @@ def _build_env(root, venv, python, requirements):
     env = dict(os.environ)
     env["UV_CACHE_DIR"] = os.path.join(root, "cache", "uv")
     env["UV_PYTHON_INSTALL_DIR"] = os.path.join(root, "python")
+    env["PATH"] = _with_gpu_tools(env.get("PATH", ""))
     shutil.rmtree(venv, ignore_errors=True)
     steps = [
         [uv, "venv", "--quiet", "--python", python, venv],
@@ -225,6 +234,7 @@ def cmd_supervise(run_dir, workdir, venv, shared, *command):
 
     if command[:1] == ("--",):
         command = command[1:]
+    os.environ["PATH"] = _with_gpu_tools(os.environ.get("PATH", ""))  # for the GPU in env.json, and for the run
     run = Path(run_dir)
     started = time.monotonic()
     heartbeat = None
