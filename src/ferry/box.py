@@ -126,10 +126,23 @@ def cmd_bootstrap_uv(root, url, sha256):
 def cmd_env(root, key, python):
     """Builds (once) the environment named `key` from requirements on stdin, and
     prints its path. Torch is picked to match this machine's driver."""
+    import fcntl
+
     requirements = sys.stdin.read()
+    os.makedirs(os.path.join(root, "envs"), exist_ok=True)
     venv = os.path.join(root, "envs", key)
+    with open(venv + ".lock", "w") as lock:  # two runs starting at once build it once
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("another run is building this environment; waiting for it", flush=True)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        _build_env(root, venv, python, requirements)
+    print(ENV_MARK + venv)
+
+
+def _build_env(root, venv, python, requirements):
     if os.path.exists(os.path.join(venv, ".ready")):
-        print(ENV_MARK + venv)
         return
     uv = os.path.join(root, "bin", "uv")
     env = dict(os.environ)
@@ -146,11 +159,11 @@ def cmd_env(root, key, python):
         if i == 1:
             with open(os.path.join(venv, "requirements.txt"), "w", encoding="utf-8") as f:
                 f.write(requirements)
+        sys.stdout.flush()
         code = subprocess.call(step, env=env, stdin=subprocess.DEVNULL)
         if code != 0:
             raise SystemExit("building the environment failed (%s exited with %d)" % (os.path.basename(step[0]), code))
     open(os.path.join(venv, ".ready"), "w").close()
-    print(ENV_MARK + venv)
 
 
 STARTED_MARK = ".ferry-started"
