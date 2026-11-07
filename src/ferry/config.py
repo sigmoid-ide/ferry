@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
@@ -15,6 +16,12 @@ HOME_ENV = "FERRY_HOME"
 
 class FerryError(Exception):
     pass
+
+
+def can_ask() -> bool:
+    """Whether someone is at a terminal to answer. Both ends must be terminals: on
+    Windows, input from the null device (as an editor gives) also counts as one."""
+    return sys.stdin.isatty() and sys.stderr.isatty()
 
 
 def home() -> Path:

@@ -11,7 +11,7 @@ import paramiko
 from hunch.store import HunchError, Store
 
 from . import __version__, launch, mirror
-from .config import FerryError, Machine, get_machine, load_machines, save_machine
+from .config import FerryError, Machine, can_ask, get_machine, load_machines, save_machine
 from .remote import Remote
 from .ssh import Box
 
@@ -80,7 +80,7 @@ def cmd_add(args) -> int:
         print(f"{args.name}: first time connecting. Its {kind} host key is\n  {fp}")
         if args.yes:
             return True
-        if not sys.stdin.isatty():
+        if not can_ask():
             raise FerryError("check the key above, then run again with --yes to trust it")
         return input("Trust this key? [y/N] ").strip().lower() in ("y", "yes")
 

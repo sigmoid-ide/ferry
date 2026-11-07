@@ -15,7 +15,7 @@ from pathlib import Path
 
 import paramiko
 
-from .config import FerryError, Machine, known_hosts_path
+from .config import FerryError, Machine, can_ask, known_hosts_path
 
 
 def fingerprint(key: paramiko.PKey) -> str:
@@ -50,6 +50,7 @@ class Box:
         self.keys = [str(Path(k).expanduser()) for k in keys if Path(k).expanduser().is_file()]
         self._client: paramiko.SSHClient | None = None
         self._sftp: paramiko.SFTPClient | None = None
+        self._passphrase: str | None = None  # typed once per ferry command, kept in memory only
 
     def _host_key_name(self) -> str:
         return self.hostname if self.port == 22 else f"[{self.hostname}]:{self.port}"
@@ -80,6 +81,15 @@ class Box:
                 f"{self.label}'s host key has changed since you added it. If you reinstalled the machine, "
                 f"remove its line from {path} and run ferry add again; otherwise something may be in the way"
             ) from None
+        except paramiko.PasswordRequiredException:
+            client.close()
+            if self._passphrase is not None:
+                raise FerryError("that passphrase did not open your SSH key") from None
+            if not can_ask():
+                raise FerryError("your SSH key is protected by a passphrase: add it to ssh-agent (ssh-add), "
+                                 "or run ferry in a terminal to type it") from None
+            self._passphrase = getpass.getpass("passphrase for your SSH key: ")
+            return self.connect(trust)
         except paramiko.AuthenticationException:
             client.close()
             raise FerryError(f"SSH refused the login to {self.user}@{self.hostname}: check your key or ssh-agent") from None
@@ -100,6 +110,7 @@ class Box:
             port=self.port,
             username=self.user,
             key_filename=self.keys or None,
+            passphrase=self._passphrase,
             timeout=15,
             banner_timeout=15,
             auth_timeout=15,
