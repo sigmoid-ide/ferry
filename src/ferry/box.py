@@ -338,8 +338,11 @@ def cmd_hash(run_dir):
     for name in sorted(os.listdir(run_dir)):
         path = os.path.join(run_dir, name)
         if os.path.isfile(path) and name not in ("heartbeat", STARTED_MARK):
+            digest = hashlib.sha256()
             with open(path, "rb") as f:
-                out[name] = hashlib.sha256(f.read()).hexdigest()
+                for block in iter(lambda: f.read(1 << 20), b""):
+                    digest.update(block)
+            out[name] = digest.hexdigest()
     print(json.dumps(out))
 
 
