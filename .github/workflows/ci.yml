@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        # macOS runners are scarce and queued jobs get cancelled, so test it on one version only.
+        include:
+          - os: macos-latest
+            python: "3.14"
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: ferry
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          path: ferry
+      # Ferry takes Hunch from the folder next to it (tool.uv.sources) until Ferry's Hunch is on PyPI.
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: sigmoid-ide/hunch
+          path: hunch
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync
+      - run: uv run pytest -q
