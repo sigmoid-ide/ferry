@@ -88,6 +88,18 @@ def test_an_address_that_refuses_or_hangs_does_not_stop_the_next():
         server.close()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="elsewhere the system grows the send buffer itself")
+def test_on_windows_the_connection_gets_a_send_buffer_big_enough_for_far_machines():
+    server = listening()
+    port = server.getsockname()[1]
+    try:
+        sock = connect_first("box", port, addresses=[at("127.0.0.1", port)])
+        assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) >= 4 << 20
+        sock.close()
+    finally:
+        server.close()
+
+
 def test_when_no_address_answers_each_says_why():
     with pytest.raises(OSError, match="127.0.0.1"):
         connect_first("box", 22, timeout=2, addresses=[at("127.0.0.1", closed_port())])

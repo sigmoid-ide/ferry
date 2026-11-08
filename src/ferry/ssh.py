@@ -26,6 +26,10 @@ from .config import FerryError, Machine, can_ask, known_hosts_path, parse_target
 MAX_JUMPS = 8  # more hops than this is a ProxyJump that leads back to itself
 CONNECT_TIMEOUT = 15  # seconds to reach the machine, then for its SSH banner and the login each
 STAGGER_SECONDS = 0.25  # before trying a host's next address alongside one that has not answered yet
+# Windows leaves a socket's send buffer at 64 KB when the socket has a timeout, as paramiko's does, and
+# paramiko writes one SSH packet at a time: uploads to a machine 71 ms away ran at 0.8 MB/s, and at 2.1 MB/s
+# with this buffer (measured 8 Nov 2026). Elsewhere the system grows the buffer itself; setting it would stop that.
+WINDOWS_SEND_BUFFER = 4 << 20
 _IN_PROGRESS = {0, errno.EINPROGRESS, errno.EWOULDBLOCK, getattr(errno, "WSAEWOULDBLOCK", errno.EWOULDBLOCK)}
 
 # Ferry says what went wrong in its own words; paramiko's log lines would only repeat it, raw.
@@ -52,6 +56,8 @@ def connect_first(host: str, port: int, timeout: float = CONNECT_TIMEOUT, addres
             if queue and (now >= next_start or not waiting):
                 family, kind, proto, _, address = queue.pop(0)
                 sock = socket.socket(family, kind, proto)
+                if os.name == "nt":
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, WINDOWS_SEND_BUFFER)
                 sock.setblocking(False)
                 code = sock.connect_ex(address)
                 if code not in _IN_PROGRESS:

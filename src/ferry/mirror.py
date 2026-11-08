@@ -66,6 +66,9 @@ def pull(sftp: paramiko.SFTPClient, state: dict, run_dir: Path, box_clock_offset
         if entry.st_size > offset:
             with sftp.open(f"{remote_dir}/{name}", "rb") as f:
                 f.seek(offset)
+                # Ask for every piece at once: one request per round trip read a big log at 0.35 MB/s
+                # from a machine 71 ms away, this at 9.9 MB/s (measured 8 Nov 2026).
+                f.prefetch(entry.st_size)
                 data = f.read(entry.st_size - offset)
             if not ended:
                 data = data[: data.rfind(b"\n") + 1]  # complete lines only; the rest comes next time
@@ -239,6 +242,7 @@ def _follow(remote: Remote, run_dir: Path, echo_output: bool) -> int:
     differ = verify(remote, state, run_dir)
     for name in differ:  # a file rewritten on the machine after it was copied: take it whole
         with remote.box.sftp().open(f"{state['dir']}/{name}", "rb") as f:
+            f.prefetch()
             (run_dir / name).write_bytes(f.read())
     if differ and verify(remote, state, run_dir):
         raise FerryError(f"the copy of {run_dir.name} does not match {label}'s; run `ferry attach` to try again")
