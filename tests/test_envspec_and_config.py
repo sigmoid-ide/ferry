@@ -63,6 +63,39 @@ def test_the_projects_own_python_is_read_never_ferrys(tmp_path, monkeypatch):
     assert local_python(tmp_path, ["python", "train.py"]) == str(tmp_path / "activated" / "bin" / "python")
 
 
+def test_an_interpreter_given_by_its_full_path_wins_and_is_python_on_the_machine(tmp_path, monkeypatch):
+    from ferry.envspec import local_python, machine_command
+
+    venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    chosen = tmp_path / "envs" / "study" / "python.exe"  # the interpreter an editor runs with
+    for python in (venv_python, chosen):
+        python.parent.mkdir(parents=True)
+        python.write_text("")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    assert local_python(tmp_path, [str(chosen), "train.py", "--lr", "3e-4"]) == str(chosen)
+    on_machine = lambda command, cwd=tmp_path: machine_command(command, tmp_path, cwd)  # noqa: E731
+    assert on_machine([str(chosen), "train.py", "--lr", "3e-4"]) == ["python", "train.py", "--lr", "3e-4"]
+    assert on_machine(["python", "-m", "train"]) == ["python", "-m", "train"]
+    assert on_machine([str(tmp_path / "tool.exe"), "x"]) == [str(tmp_path / "tool.exe"), "x"]  # not a Python
+    # Editors give the script by its full path; the project is somewhere else on the machine.
+    script, outside = tmp_path / "src" / "train.py", tmp_path.parent / "elsewhere.txt"
+    assert on_machine([str(chosen), str(script), str(outside)]) == ["python", "src/train.py", str(outside)]
+    assert on_machine([str(chosen), str(script), "--out", str(tmp_path / "out")], tmp_path / "src") == ["python", "train.py", "--out", "../out"]
+
+
+def test_machines_list_as_json_for_editors(tmp_path, monkeypatch, capsys):
+    import json
+
+    from ferry.cli import main
+
+    monkeypatch.setenv("FERRY_HOME", str(tmp_path))
+    assert main(["machines", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    save_machine(Machine(name="gpu", host="127.0.0.1", user="me", key="~/.ssh/ferry", gpu="RTX 3060"))
+    assert main(["machines", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == [{"name": "gpu", "host": "127.0.0.1", "user": "me", "gpu": "RTX 3060"}]
+
+
 def test_an_unreadable_python_without_requirements_says_what_to_do(tmp_path):
     with pytest.raises(FerryError, match="requirements.txt"):
         env_spec(tmp_path, {"executable": "python", "error": "not found"})

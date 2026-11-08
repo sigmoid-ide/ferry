@@ -41,9 +41,44 @@ def _normalise(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+PYTHON_NAME = re.compile(r"^(python[\d.]*|pythonw|py)(\.exe)?$", re.IGNORECASE)
+
+
+def explicit_python(command: list[str]) -> str | None:
+    """The command's interpreter when it is given by its full path on this computer, as
+    editors give it: that is the environment the user chose."""
+    first = Path(command[0]) if command else None
+    if first is not None and first.is_absolute() and PYTHON_NAME.match(first.name) and first.is_file():
+        return str(first)
+    return None
+
+
+def machine_command(command: list[str], root: Path, cwd: Path) -> list[str]:
+    """The command as the machine runs it. An interpreter given by its full path here becomes
+    `python`, which on the machine is the run's own environment, and a full path into the
+    project, as editors give the script, becomes relative to `cwd`: the project sits elsewhere there."""
+    first = "python" if explicit_python(command) else command[0]
+    return [first, *(_in_project(arg, root, cwd) for arg in command[1:])]
+
+
+def _in_project(arg: str, root: Path, cwd: Path) -> str:
+    path = Path(arg)
+    if not path.is_absolute():
+        return arg
+    try:
+        inside = path.resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        return arg
+    return Path(os.path.relpath(root.resolve() / inside, cwd.resolve())).as_posix()
+
+
 def local_python(root: Path, command: list[str]) -> str:
-    """The Python the command would run with here: an activated environment first, then
-    the project's .venv, then whatever the command finds on PATH. Never Ferry's own."""
+    """The Python the command would run with here: one given by its full path, then an
+    activated environment, then the project's .venv, then whatever the command finds on
+    PATH. Never Ferry's own."""
+    explicit = explicit_python(command)
+    if explicit:
+        return explicit
     if not os.environ.get("VIRTUAL_ENV"):
         for candidate in (root / ".venv" / "Scripts" / "python.exe", root / ".venv" / "bin" / "python"):
             if candidate.is_file():

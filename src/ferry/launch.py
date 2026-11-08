@@ -14,7 +14,7 @@ from hunch.store import LOST_AFTER_SECONDS, Store, append_jsonl, finish_run, rea
 
 from . import box, data, mirror
 from .config import FerryError, can_ask, get_machine
-from .envspec import env_spec, local_python
+from .envspec import env_spec, local_python, machine_command
 from .remote import Remote, project_key
 from .ssh import Box
 
@@ -129,7 +129,7 @@ def run(name: str, command: list[str], why: str | None, parent_ref: str | None, 
             remote.send_files(paths.run_dir, run_dir, RUN_FILES)
             remote.checkout(paths)
             may_be_running = True
-            remote.start(paths, venv, command, cwd, env_vars)
+            remote.start(paths, venv, machine_command(command, store.root, Path.cwd()), cwd, env_vars)
         except BaseException as e:
             if may_be_running and not isinstance(e, FerryError):
                 # Cut off while the machine was starting it: it may well be going. Keep it, and say how to find out.

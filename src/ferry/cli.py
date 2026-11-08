@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -30,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     add.set_defaults(handler=cmd_add)
 
     machines = commands.add_parser("machines", help="list your machines")
+    machines.add_argument("--json", action="store_true", help="as JSON, for editors and scripts")
     machines.set_defaults(handler=cmd_machines)
 
     run = commands.add_parser("run", help="run a command on a machine and bring the run home")
@@ -124,6 +126,10 @@ def cmd_add(args) -> int:
 
 def cmd_machines(args) -> int:
     machines = load_machines()
+    if args.json:
+        fields = ("name", "host", "user", "port", "hostname", "arch", "gpu", "driver", "python")
+        print(json.dumps([{k: getattr(m, k) for k in fields if getattr(m, k) is not None} for m in machines.values()]))
+        return 0
     if not machines:
         print("no machines yet. Add one with: ferry add mybox user@host")
         return 0
