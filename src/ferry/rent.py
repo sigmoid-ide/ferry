@@ -28,7 +28,7 @@ from hunch.store import HunchError, Store, read_json, write_json
 from .config import FerryError, Machine, can_ask, get_machine, home, remove_machine, rented_dir, save_machine
 from .remote import Remote
 from .ssh import Box, connect_first
-from .vast import DISK_GB, Offer, Vast, VastError, stored_key
+from .vast import DISK_GB, Offer, Vast, VastError, parse_query, stored_key
 
 IMAGE = "vastai/base-image:@vastai-automatic-tag"
 LABEL = "ferry"
@@ -145,33 +145,46 @@ def is_offer(choice: str) -> bool:
 
 
 def candidates(v: Vast, choice: str, seconds: int, disk: int) -> list[Offer]:
-    """The offer to rent first, then up to two near it in price to fall back on: the same
-    GPUs, from hosts not skipped, whose contracts outlast the cap."""
+    """The offer to rent first, then up to two to fall back on: the same GPUs, from hosts
+    not skipped, whose contracts outlast the cap. For a GPU name, up to a fifth dearer; for
+    an offer someone picked, at its price or less, so the most it can cost stays as shown."""
     avoid = skipped()
     latest = time.time() + seconds + MARGIN
 
     def usable(o: Offer) -> bool:
         return str(o.machine) not in avoid and (o.ends is None or o.ends >= latest)
 
-    if is_offer(choice):
-        found = v.search(offer=int(choice), disk=disk, any_host=True)
+    # An offer id, search words (4090 europe <0.5), or both: the words then keep the fallbacks near it.
+    words = choice.split()
+    picked = next((w for w in words if is_offer(w)), None)
+    query = parse_query([w for w in words if w != picked])
+    if picked:
+        found = v.search(offer=int(picked), disk=disk, any_host=True)
         if not found:
-            raise FerryError(f"offer {choice} is not free any more, or no longer meets Ferry's bar. "
+            raise FerryError(f"offer {picked} is not free any more, or no longer meets Ferry's bar. "
                              f"`ferry gpus` shows what is")
         first = found[0]
         if first.ends is not None and first.ends < latest:
-            raise FerryError(f"offer {choice}'s host is rented out only until {time.strftime('%d %b %H:%M', time.localtime(first.ends))}, "
+            raise FerryError(f"offer {picked}'s host is rented out only until {time.strftime('%d %b %H:%M', time.localtime(first.ends))}, "
                              f"before your time is up. Pick another offer, or a shorter --for")
-        others = v.search(first.gpu, disk=disk, any_host=first.tier == "unverified")
+        others = v.search(first.gpu, disk=disk, any_host=first.tier == "unverified", query=query)
     else:
-        others = v.search(choice, disk=disk)
+        others = v.search(disk=disk, query=query)
         found = [o for o in others if usable(o)]
         if not found:
-            raise FerryError(f"no {choice} on Vast.ai right now that Ferry can use. `ferry gpus` shows what there is")
+            raise FerryError(f"no offers on Vast.ai right now for {query.describe()} that Ferry can use. "
+                             f"`ferry gpus` shows what there is")
         first = found[0]
+    limit = first.price if picked else first.price * NEARBY
     near = [o for o in others if o.id != first.id and o.gpu == first.gpu and o.count == first.count
-            and o.machine != first.machine and o.price <= first.price * NEARBY and usable(o)]
+            and o.machine != first.machine and o.price <= limit and usable(o)]
     return [first, *near[:TRIES - 1]]
+
+
+def transfer(offer: Offer) -> str:
+    if not offer.up_cost and not offer.down_cost:
+        return "and moving data to and from it is free"
+    return f"plus ${offer.up_cost:.4f} per GB you send it and ${offer.down_cost:.4f} per GB you bring back"
 
 
 def describe(offers: list[Offer], seconds: int) -> str:
@@ -183,8 +196,7 @@ def describe(offers: list[Offer], seconds: int) -> str:
     most = top * seconds / 3600
     host = "an unverified host, which, like any host, can see your code and data" if first.tier == "unverified" else f"a {first.tier} host"
     text = (f"{gpu} on Vast.ai, offer {first.id}: {rate} with {first.disk} GB disk, {host} in {first.place}.\n"
-            f"For {duration(seconds)} it costs at most ${most:.2f}, plus ${first.up_cost:.4f} per GB you send it "
-            f"and ${first.down_cost:.4f} per GB you bring back.")
+            f"For {duration(seconds)} it costs at most ${most:.2f}, {transfer(first)}.")
     return text
 
 
@@ -306,6 +318,15 @@ def _wait_running(v: Vast, instance: int, name: str, waking: bool = False) -> di
     raise _Unusable(f"it did not start within {BOOT_WAIT // 60} minutes")
 
 
+def _phase(status: str | None, waking: bool) -> str:
+    if status == "loading":
+        return ("the host is downloading the machine's image, which takes a few minutes when the host does not "
+                "have it yet; Vast.ai does not bill for this")
+    if status in ("exited", "stopped") and waking:
+        return "starting again"
+    return "waiting for the host" if status in (None, "created") else str(status)
+
+
 def _host_keys(v: Vast, instance: int) -> list[paramiko.PKey]:
     """The host keys onstart printed to the instance log, read over HTTPS, so the first
     connection is checked too."""
@@ -318,15 +339,6 @@ def _host_keys(v: Vast, instance: int) -> list[paramiko.PKey]:
             if not _whole(match[1], match[2]):
                 continue
             try:
-def _phase(status: str | None, waking: bool) -> str:
-    if status == "loading":
-        return ("the host is downloading the machine's image, which takes a few minutes when the host does not "
-                "have it yet; Vast.ai does not bill for this")
-    if status in ("exited", "stopped") and waking:
-        return "starting again"
-    return "waiting for the host" if status in (None, "created") else str(status)
-
-
                 entry = paramiko.hostkeys.HostKeyEntry.from_line(f"x {match[1]} {match[2]}")
             except (paramiko.hostkeys.InvalidHostKey, paramiko.SSHException, ValueError, TypeError):
                 continue

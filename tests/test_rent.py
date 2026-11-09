@@ -92,15 +92,35 @@ def test_a_fresh_key_for_each_machine():
 
 # Offers
 
-def test_gpu_names_typed_any_way_match_vasts():
-    assert "RTX 4090" in vast.gpu_names("rtx_4090")
-    assert "RTX 4090" in vast.gpu_names("4090")
-    assert {"A100 SXM4", "A100 PCIE"} <= set(vast.gpu_names("a100"))
-    assert "Titan RTX" in vast.gpu_names("titan rtx")
-    assert "GTX TITAN X" in vast.gpu_names("gtx titan x")
-    assert "RTX 3060 Ti" in vast.gpu_names("RTX 3060 TI")
-    assert vast.gpu_names("  ") == []
+NAMES = ["A10", "A100 PCIE", "A100 SXM4", "A100X", "GTX TITAN X", "L4", "L40", "L40S", "RTX 3060", "RTX 3060 Ti",
+         "RTX 3060 laptop", "RTX 4070 laptop", "RTX 4090", "RTX 4090D", "Titan RTX"]
+
+
+def test_gpu_words_typed_any_way_find_vasts_names():
+    match = lambda text: vast.matching_gpus(NAMES, text)  # noqa: E731
+    assert match("laptop") == ["RTX 3060 laptop", "RTX 4070 laptop"]  # part of a name finds every such GPU
+    assert match("4090") == ["RTX 4090", "RTX 4090D"]
+    assert match("rtx_4090") == ["RTX 4090"]  # a whole name is that one
+    assert match("a100") == ["A100 PCIE", "A100 SXM4", "A100X"]
+    assert match("a10") == ["A10"] and match("L4") == ["L4"]
+    assert match("3060 ti") == ["RTX 3060 Ti"]
+    assert match("titan") == ["GTX TITAN X", "Titan RTX"]
+    assert match("nothing like it") == [] and match("  ") == []
+    assert vast.parse_query(["3060", "ti"]).where == []  # ti is part of the GPU, not a country
     assert rent.is_offer("52708846") and not rent.is_offer("4090")
+
+
+def test_gpu_names_come_from_vast_once_a_day(monkeypatch):
+    calls = []
+
+    def call(self, method, path, body=None, retry=True, auth=True):
+        calls.append(path)
+        return {"gpu_names": NAMES}
+
+    monkeypatch.setattr(vast.Vast, "call", call)
+    assert vast.Vast().gpu_list() == NAMES
+    assert vast.Vast().gpu_list() == NAMES
+    assert calls == ["/gpu_names/unique/"]
 
 
 def test_durations():
@@ -139,7 +159,7 @@ class FakeVast:
         self.offers = offers
         self.searches = []
 
-    def search(self, gpu=None, max_price=None, any_host=False, disk=40, offer=None):
+    def search(self, gpu=None, max_price=None, any_host=False, disk=40, offer=None, query=None):
         self.searches.append((gpu, offer))
         if offer is not None:
             return [o for o in self.offers if o.id == offer]
@@ -162,7 +182,8 @@ def test_a_host_whose_port_never_answered_is_not_picked_again():
 
 
 def test_an_offer_id_rents_that_offer_or_says_why_not():
-    v = FakeVast([offer(5270007, 0.50), offer(5270008, 0.52)])
+    # Falls back only at its price or less: what it showed is the most it can cost.
+    v = FakeVast([offer(5270007, 0.50), offer(5270008, 0.50), offer(5270010, 0.52)])
     assert [o.id for o in rent.candidates(v, "5270007", 7200, 40)] == [5270007, 5270008]
     with pytest.raises(FerryError, match="not free any more"):
         rent.candidates(v, "5270009", 7200, 40)
@@ -349,3 +370,32 @@ def test_an_unreachable_machine_goes_back_and_the_next_offer_is_tried(monkeypatc
     assert created == [2, 4] and destroyed == [102, 104]  # both given back, even on Ctrl+C
     assert "2" in rent.skipped() and "4" not in rent.skipped()
     assert load_machines() == {}
+
+
+def test_search_words_say_the_gpu_where_the_price_memory_and_count():
+    q = vast.parse_query(["rtx", "4090", "europe", "<0.5", "24gb", "2x"])
+    assert (q.gpu, q.max_price, q.memory, q.count) == ("rtx 4090", 0.5, 24, 2)
+    assert "DE" in q.where and "PL" in q.where and "US" not in q.where
+    assert q.describe() == "2x rtx 4090, 24 GB or more, in Europe, at most $0.50 an hour"
+    q = vast.parse_query(["a100", "us,ca", "$1.2", "dc"])
+    assert (q.gpu, q.where, q.max_price, q.datacenter) == ("a100", ["CA", "US"], 1.2, True)
+    assert vast.parse_query(["uk", "<=0.3"]).where == ["GB"]
+    assert vast.parse_query([]).describe() == "any GPU"
+    assert vast.parse_query(["l4", "48g"]).gpu == "l4"  # a GPU name with a digit is not a country
+
+
+def test_an_offer_id_with_words_keeps_its_fallbacks_where_the_words_say():
+    seen = []
+
+    class Recording(FakeVast):
+        def search(self, gpu=None, max_price=None, any_host=False, disk=40, offer=None, query=None):
+            seen.append(query)
+            return super().search(gpu, max_price, any_host, disk, offer, query)
+
+    v = Recording([offer(5270007, 0.50), offer(5270008, 0.50)])
+    assert [o.id for o in rent.candidates(v, "5270007 europe", 7200, 40)] == [5270007, 5270008]
+    assert "DE" in seen[-1].where
+
+
+def test_free_data_transfer_is_said_plainly():
+    assert "moving data to and from it is free" in rent.describe([vast.Offer.of(dict(RAW, inet_down_cost=0, inet_up_cost=0), 40)], 3600)

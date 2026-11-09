@@ -40,8 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     run = commands.add_parser("run", help="run a command on a machine and bring the run home")
     run.add_argument("--on", metavar="MACHINE", help="the machine to run on")
     run.add_argument("--rent", metavar="OFFER",
-                     help="rent a GPU on Vast.ai for this run instead: an offer from `ferry gpus`, or a GPU name such as "
-                          '"RTX 4090" for its cheapest offer. Given back once the run is home')
+                     help="rent a GPU on Vast.ai for this run instead: an offer from `ferry gpus`, or search words such as "
+                          '"4090 europe" for the cheapest such offer. Given back once the run is home')
     run.add_argument("--for", dest="for_", metavar="TIME",
                      help="with --rent: the most time the machine may run, such as 2h or 90m; it destroys itself then")
     run.add_argument("--disk", type=int, default=vast.DISK_GB, metavar="GB", help=f"with --rent: its disk (default: {vast.DISK_GB})")
@@ -92,13 +92,19 @@ def main(argv: list[str] | None = None) -> int:
 
     login = commands.add_parser("login", help="keep your Vast.ai API key in the OS keychain")
     login.add_argument("provider", choices=["vast"])
+    login.add_argument("--check", action="store_true", help="only say whether a key is kept (exit 1 if not), for editors")
     login.set_defaults(handler=cmd_login)
 
     logout = commands.add_parser("logout", help="remove your Vast.ai API key from the OS keychain")
     logout.add_argument("provider", choices=["vast"])
     logout.set_defaults(handler=cmd_logout)
 
-    gpus = commands.add_parser("gpus", help="GPUs you can rent on Vast.ai now, cheapest first")
+    gpus = commands.add_parser("gpus", help="GPUs you can rent on Vast.ai now, cheapest first",
+                               description="Search words narrow the list: a GPU (4090, a100), where (europe, "
+                                           "north-america, asia, oceania, or country codes such as de or us), "
+                                           "<0.5 for at most $0.50 an hour, 24gb for at least 24 GB per GPU, 2x for "
+                                           "two GPUs, and datacenter for datacenter hosts only.")
+    gpus.add_argument("words", nargs="*", metavar="WORD", help="what to look for, such as: 4090 europe <0.5")
     gpus.add_argument("--gpu", metavar="NAME", help='only this GPU, such as "RTX 4090", 4090 or A100')
     gpus.add_argument("--max-price", type=float, metavar="DOLLARS", help="at most this much per hour")
     gpus.add_argument("--any-host", action="store_true",
@@ -107,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     gpus.set_defaults(handler=cmd_gpus)
 
     rent_ = commands.add_parser("rent", help="rent a GPU on Vast.ai and add it as a machine")
-    rent_.add_argument("offer", help='an offer from `ferry gpus`, or a GPU name such as "RTX 4090" for its cheapest offer')
+    rent_.add_argument("offer", help='an offer from `ferry gpus`, or search words such as "4090 europe" for the cheapest such offer')
     rent_.add_argument("--for", dest="for_", required=True, metavar="TIME",
                        help="the most time it may run, such as 3h or 90m; it destroys itself then")
     rent_.add_argument("--disk", type=int, default=vast.DISK_GB, metavar="GB",
@@ -251,6 +257,12 @@ def cmd_clean(args) -> int:
 
 
 def cmd_login(args) -> int:
+    if args.check:
+        if vast.stored_key():
+            print("logged in to Vast.ai")
+            return 0
+        print("ferry: not logged in to Vast.ai. Run: ferry login vast", file=sys.stderr)
+        return 1
     if not can_ask():
         raise FerryError(f"run ferry login in a terminal to type the key, or set {vast.KEY_ENV}")
     print("Paste an API key from the Keys page of your Vast.ai account. It is not shown as you type.")
@@ -274,17 +286,18 @@ def cmd_logout(args) -> int:
 
 
 def cmd_gpus(args) -> int:
-    offers = vast.Vast(vast.stored_key()).search(args.gpu, args.max_price, args.any_host)
+    query = vast.parse_query(args.words)
+    query.gpu = args.gpu or query.gpu
+    query.max_price = args.max_price if args.max_price is not None else query.max_price
+    offers = vast.Vast(vast.stored_key()).search(any_host=args.any_host, query=query)
     if args.json:
-        print(json.dumps([offer.to_json() for offer in offers]))
+        print(json.dumps({"understood": query.describe(), "offers": [offer.to_json() for offer in offers]}))
         return 0
     if not offers:
-        wanted = f" {args.gpu}" if args.gpu else ""
-        cap = f" at ${args.max_price:g}/h or less" if args.max_price is not None else ""
-        print(f"no{wanted} offers on Vast.ai{cap} right now that Ferry can use"
+        print(f"no offers on Vast.ai right now for {query.describe()} that Ferry can use"
               f"{'' if args.any_host else ' from verified hosts'}.")
         return 0
-    print(f"Offers on Vast.ai now, cheapest first. Prices include {vast.DISK_GB} GB of disk.")
+    print(f"Offers on Vast.ai now for {query.describe()}, cheapest first. Prices include {vast.DISK_GB} GB of disk.")
     print(f"{'OFFER':<10}{'GPU':<22}{'MEMORY':>8}{'$/HOUR':>9}  {'RELIABLE':>8}  {'HOST':<11}{'WHERE':<22}{'DOWNLOAD':>10}")
     shown = offers[:GPU_ROWS]
     for o in shown:

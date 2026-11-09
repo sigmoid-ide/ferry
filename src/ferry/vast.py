@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from . import __version__
-from .config import FerryError
+from .config import FerryError, home
 
 API = "https://console.vast.ai/api/v0"
 KEY_ENV = "VAST_API_KEY"
@@ -132,22 +133,101 @@ class Offer:
         return asdict(self)
 
 
-# Words in Vast's GPU names that are not all capitals, so a name typed in any case still matches.
-_WORDS = {"ti": "Ti", "laptop": "laptop", "tesla": "Tesla", "titan": "Titan", "quadro": "Quadro", "xp": "Xp",
-          "max-q": "Max-Q", "6000ada": "6000Ada"}
-_SUFFIXES = ("", " SXM", " SXM4", " SXM5", " PCIE", " NVL")
+NAMES_FILE = "vast-gpu-names.json"  # Vast's GPU names (not offers), kept a day like Vast's own CLI does
+NAMES_SECONDS = 24 * 3600
 
 
-def gpu_names(text: str) -> list[str]:
-    """The names Vast may call a GPU typed as `text`, such as rtx_4090, 4090 or a100:
-    Vast's filter matches names exactly, and has no contains."""
-    words = text.replace("_", " ").split()
-    if not words:
-        return []
-    bases = {" ".join(words), " ".join(w.upper() for w in words), " ".join(_WORDS.get(w.lower(), w.upper()) for w in words)}
-    if words[0][0].isdigit():  # 4090 means RTX 4090
-        bases |= {f"{prefix} {base}" for base in list(bases) for prefix in ("RTX", "GTX")}
-    return sorted({base + suffix for base in bases for suffix in _SUFFIXES})
+def _squash(text: str) -> str:
+    return re.sub(r"[\s_-]+", "", text.lower())
+
+
+def matching_gpus(names: list[str], text: str) -> list[str]:
+    """Vast's GPU names that `text` means: the one it names exactly (a10, l4, rtx_4090), else
+    every name that holds all its words, in any case (laptop, 4090, 3060 ti, a100). Vast's
+    own filter matches whole names only."""
+    exact = [name for name in names if _squash(name) == _squash(text)]
+    if exact:
+        return exact
+    words = [_squash(word) for word in text.replace("_", " ").split()]
+    return [name for name in names if words and all(word in _squash(name) for word in words)]
+
+
+REGIONS = {
+    "europe": "AT BE BG CH CY CZ DE DK EE ES FI FR GB GR HR HU IE IS IT LT LU LV MT NL NO PL PT RO RS SE SI SK UA",
+    "north-america": "US CA MX",
+    "south-america": "AR BR CL CO EC PE UY",
+    "asia": "CN HK ID IN JP KR KZ MY PH SG TH TW VN",
+    "oceania": "AU NZ",
+    "middle-east": "AE IL QA SA TR",
+    "africa": "EG KE MA NG ZA",
+}
+_REGION_WORDS = {"eu": "europe", "na": "north-america", "america": "north-america", "sa": "south-america",
+                 "apac": "asia", "oc": "oceania", "me": "middle-east", "uk": "GB", **{r: r for r in REGIONS}}
+_COUNTRIES = set(" ".join(REGIONS.values()).split())
+_PRICE = re.compile(r"<=?\$?(\d+(?:\.\d+)?)|\$(\d+(?:\.\d+)?)")
+_MEMORY = re.compile(r"(\d+)\s*gb?")
+_COUNT = re.compile(r"(\d+)x")
+
+
+@dataclass
+class Query:
+    """A search for offers, from words such as `4090 europe <0.5 24gb 2x`: the GPU, where,
+    the most per hour, the least memory per GPU, how many GPUs, and datacenters only."""
+
+    gpu: str | None = None
+    max_price: float | None = None
+    memory: int | None = None  # GB per GPU
+    count: int | None = None
+    where: list[str] = field(default_factory=list)  # two-letter country codes
+    datacenter: bool = False
+
+    def describe(self) -> str:
+        parts = [f"{self.count}x {self.gpu or 'GPUs'}" if self.count else (self.gpu or "any GPU")]
+        if self.memory:
+            parts.append(f"{self.memory} GB or more")
+        if self.where:
+            parts.append("in " + _places(self.where))
+        if self.max_price is not None:
+            parts.append(f"at most ${self.max_price:.2f} an hour")
+        if self.datacenter:
+            parts.append("in datacenters")
+        return ", ".join(parts)
+
+
+def _places(codes: list[str]) -> str:
+    for region, members in REGIONS.items():
+        if sorted(members.split()) == sorted(codes):
+            return region.replace("-", " ").title()
+    return ", ".join(codes)
+
+
+def parse_query(words: list[str]) -> Query:
+    """Reads search words: `<0.5` or `$0.5` is the most per hour, `24gb` the least memory per
+    GPU, `2x` the number of GPUs, a region (europe, north-america, asia, oceania, ...) or
+    two-letter country codes where, `datacenter` (or `dc`) datacenter hosts only, and the
+    other words the GPU, such as `rtx 4090` or `a100`."""
+    query = Query()
+    gpu: list[str] = []
+    for word in " ".join(words).replace(",", " ").split():
+        lower = word.lower()
+        if match := _PRICE.fullmatch(lower):
+            query.max_price = float(match[1] or match[2])
+        elif match := _MEMORY.fullmatch(lower):
+            query.memory = int(match[1])
+        elif match := _COUNT.fullmatch(lower):
+            query.count = int(match[1])
+        elif lower in ("datacenter", "dc"):
+            query.datacenter = True
+        elif lower in _REGION_WORDS:
+            place = _REGION_WORDS[lower]
+            query.where += REGIONS[place].split() if place in REGIONS else [place]
+        elif word.upper() in _COUNTRIES:  # de, us; not ti, as in 3060 ti
+            query.where.append(word.upper())
+        else:
+            gpu.append(word)
+    query.gpu = " ".join(gpu) or None
+    query.where = sorted(set(query.where))
+    return query
 
 
 class Vast:
@@ -190,30 +270,67 @@ class Vast:
     # Offers
 
     def search(self, gpu: str | None = None, max_price: float | None = None, any_host: bool = False,
-               disk: int = DISK_GB, offer: int | None = None) -> list[Offer]:
+               disk: int = DISK_GB, offer: int | None = None, query: Query | None = None) -> list[Offer]:
         """Offers to rent now, cheapest first: a direct SSH port, enough disk, a driver
         current PyTorch runs on, and a verified host unless `any_host`. With `offer`, that
-        one offer, if it is still free and meets the same bar."""
-        query: dict = {
+        one offer, if it is still free and meets the same bar. `query` narrows it further;
+        `gpu` and `max_price` win over its own."""
+        query = query or Query()
+        gpu = gpu or query.gpu
+        max_price = max_price if max_price is not None else query.max_price
+        filters: dict = {
             "rentable": {"eq": True}, "rented": {"eq": False}, "direct_port_count": {"gte": 1},
             "reliability": {"gte": MIN_RELIABILITY}, "inet_down": {"gte": MIN_DOWNLOAD}, "cuda_max_good": {"gte": MIN_CUDA},
             "order": [["dph_total", "asc"]], "type": "on-demand", "allocated_storage": disk, "limit": 64,
         }
         if not any_host:
-            query["verified"] = {"eq": True}
+            filters["verified"] = {"eq": True}
         if gpu:
-            query["gpu_name"] = {"in": gpu_names(gpu)}
+            names = matching_gpus(self.gpu_list(), gpu)
+            if not names:
+                return []  # no GPU is called that
+            filters["gpu_name"] = {"in": names}
         if max_price is not None:
-            query["dph_total"] = {"lte": max_price}
+            filters["dph_total"] = {"lte": max_price}
         if offer is not None:
-            query["ask_contract_id"] = {"eq": offer}  # an offer's id; Vast ignores a filter on "id"
-        answer = self.call("POST", "/bundles/", query, auth=bool(self._key))
+            filters["ask_contract_id"] = {"eq": offer}  # an offer's id; Vast ignores a filter on "id"
+        if query.memory:
+            filters["gpu_ram"] = {"gte": round(query.memory * 1024 * 0.92)}  # 24 GB cards say 23028 to 24564 MB
+        if query.count:
+            filters["num_gpus"] = {"eq": query.count}
+        if query.where:
+            filters["geolocation"] = {"in": query.where}  # two-letter codes; Vast matches the "City, CC" ending
+        if query.datacenter:
+            filters["datacenter"] = {"eq": True}
+        answer = self.call("POST", "/bundles/", filters, auth=bool(self._key))
         offers = answer.get("offers") if isinstance(answer, dict) else None
         if not isinstance(offers, list):
             raise VastError("Vast.ai's offer list could not be read")
         found = [Offer.of(raw, disk) for raw in offers if isinstance(raw, dict) and raw.get("id")]
         # Vast's own price filter let a $0.625 offer through a $0.60 limit (9 Nov 2026), so check again.
         return [o for o in found if max_price is None or o.price <= max_price]
+
+    def gpu_list(self) -> list[str]:
+        """Every GPU name Vast uses, such as "RTX 3060 laptop", kept a day in Ferry's folder."""
+        path = home() / NAMES_FILE
+        try:
+            if time.time() - path.stat().st_mtime < NAMES_SECONDS:
+                names = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(names, list) and names:
+                    return names
+        except (OSError, ValueError):
+            pass
+        answer = self.call("GET", "/gpu_names/unique/", auth=False)
+        names = answer.get("gpu_names") if isinstance(answer, dict) else None
+        if not isinstance(names, list) or not names:
+            raise VastError("Vast.ai's list of GPU names could not be read")
+        names = [str(name) for name in names]
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(names), encoding="utf-8")
+        except OSError:
+            pass  # asked again next time
+        return names
 
     # The account
 
