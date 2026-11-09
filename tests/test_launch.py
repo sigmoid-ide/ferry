@@ -92,6 +92,7 @@ def test_a_gpu_the_machine_lacks_is_refused_and_a_busy_one_is_pointed_out(capsys
     assert "GPU 0 on box is already in use by another program (11.0 of 24.0 GB); GPU 1 is free: --gpus 1" in capsys.readouterr().err
     launch.check_gpus("box", GPUS, "1")
     launch.check_gpus("box", GPUS, "GPU-5f1c")  # ids are left to CUDA
+    launch.check_gpus("vast-1", GPUS, None, rented=True)  # a rented GPU is the renter's alone
     assert capsys.readouterr().err == ""
 
 

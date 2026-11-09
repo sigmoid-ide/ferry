@@ -12,8 +12,8 @@ import paramiko
 from hunch.capture import capture_env, start_run
 from hunch.store import LOST_AFTER_SECONDS, Store, append_jsonl, finish_run, read_json, timestamp, write_json
 
-from . import box, data, mirror
-from .config import FerryError, can_ask, get_machine
+from . import box, data, mirror, rent
+from .config import FerryError, Machine, can_ask, get_machine, load_machines
 from .envspec import env_spec, local_python, machine_command
 from .remote import Remote, project_key
 from .ssh import Box
@@ -54,10 +54,11 @@ def run_env(specs: list[str], gpus: str | None = None) -> dict[str, str]:
     return env
 
 
-def check_gpus(name: str, gpus: list[dict], wanted: str | None) -> None:
+def check_gpus(name: str, gpus: list[dict], wanted: str | None, rented: bool = False) -> None:
     """Refuses GPU numbers the machine does not have, which CUDA would quietly answer by
     running on the CPU, and warns when another program already computes on a GPU the
-    run gets."""
+    run gets. Not on a rented machine: its GPUs are the renter's alone, and the host's own
+    program on them (218 MiB, outside the container, on Vast.ai, 9 Nov 2026) is no one else's run."""
     by_index = {gpu["index"]: gpu for gpu in gpus}
     if wanted is not None and not GPU_LIST.fullmatch(wanted):
         return  # GPU ids, or none at all: nothing to check against these numbers
@@ -73,22 +74,100 @@ def check_gpus(name: str, gpus: list[dict], wanted: str | None) -> None:
         chosen = gpus
     free = [gpu["index"] for gpu in gpus if not gpu["busy"]]
     for gpu in chosen:
-        if gpu["busy"]:
+        if gpu["busy"] and not rented:
             hint = f"; GPU {free[0]} is free: --gpus {free[0]}" if free else "; the run may run out of memory or go slower"
             say(f"GPU {gpu['index']} on {name} is already in use by another program "
                 f"({gpu['busy'] / 1024:.1f} of {gpu['memory'] / 1024:.1f} GB){hint}")
 
 
-def connect(name: str) -> Remote:
-    """Connects and puts the current helper on the machine, so every command it knows is there."""
+def connect(name: str, wake: bool = True) -> Remote:
+    """Connects and puts the current helper on the machine, so every command it knows is there.
+    A rented machine that stopped itself is started again, unless `wake` is False."""
     machine = get_machine(name)
+    woke = rent.wake(machine, start=wake) if machine.provider else None
     remote = Remote(Box(machine).connect())
     try:
+        if woke:
+            rent.note_stop(machine, remote.box, woke)
         remote.install_helper()
     except BaseException:
         remote.box.close()
         raise
     return remote
+
+
+def _rented(name: str) -> Machine | None:
+    """The machine, when it is rented and Ferry still has it."""
+    machine = load_machines().get(name)
+    return machine if machine is not None and machine.provider else None
+
+
+def _until(name: str) -> float | None:
+    """A rented machine's time cap, which the copy stops at."""
+    machine = _rented(name)
+    return machine.deadline if machine else None
+
+
+def _rented_state(name: str) -> dict:
+    machine = _rented(name)
+    if machine is None:
+        return {}
+    return {"provider": machine.provider, "tier": machine.tier, "country": (machine.place or "").rsplit(",", 1)[-1].strip(),
+            "price": machine.price}
+
+
+def _after(name: str, run_dir: Path, code: int) -> int:
+    """Once the copy of a run on a rented machine stops: gives a machine rented for this run
+    back when the run is home or the time is up, and records what the run cost."""
+    machine = _rented(name)
+    if machine is None:
+        return code
+    short = run_dir.name[-4:]
+    if code == 130:
+        say(f"{name} keeps going until {time.strftime('%H:%M', time.localtime(machine.deadline))}, when it destroys itself. "
+            f"`ferry attach {short}` brings the run home" + (f" and gives {name} back" if machine.once else ""))
+        return code
+    capped = code == mirror.CAPPED
+    if capped and read_json(run_dir / "end.json") is None:
+        append_jsonl(run_dir / "notes.jsonl", {"at": timestamp(), "kind": "ferry", "value": f"the time rented on {name} ran out"})
+        finish_run(run_dir, status="killed", exit_code=None, duration=_since_start(run_dir))
+    if machine.once or capped:
+        rent.release(name, yes=True)
+        stopped = machine.stopped_seconds or 0
+        running = time.time() - (machine.rented_at or time.time()) - stopped
+    else:
+        stopped = 0
+        running = float(read_json(run_dir / "end.json", {}).get("duration") or 0)
+    rent.write_cost(run_dir, machine, running, stopped)
+    return 1 if capped else code
+
+
+def _since_start(run_dir: Path) -> float:
+    from datetime import datetime
+
+    try:
+        started = datetime.fromisoformat(read_json(run_dir / "run.json", {})["started_at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+    return max(0.0, time.time() - started)
+
+
+def run_rented(choice: str, seconds: int, disk: int, yes: bool, command: list[str], why: str | None,
+               parent_ref: str | None, data_paths: list[str] = (), env_vars: dict[str, str] | None = None) -> int:
+    """Rents a machine for this one run, runs on it, and gives it back once the run is home."""
+    store = Store.find()  # outside a project, fail before renting anything
+    if parent_ref:
+        store.resolve(parent_ref)
+    data.collect(store.root, list(data_paths))
+    machine = rent.rent(choice, seconds, disk, yes, once=True)
+    try:
+        return run(machine.name, command, why, parent_ref, data_paths, env_vars)
+    except BaseException:
+        if rent.runs_not_home(machine.name):
+            raise  # the run may be going there: the machine stays, with its time cap
+        say(f"the run did not start, so {machine.name} goes back")
+        rent.release(machine.name, yes=True)
+        raise
 
 
 def run(name: str, command: list[str], why: str | None, parent_ref: str | None, data_paths: list[str] = (),
@@ -102,7 +181,7 @@ def run(name: str, command: list[str], why: str | None, parent_ref: str | None, 
     remote = connect(name)
     try:
         say(f"getting {name} ready")
-        check_gpus(name, remote.gpus(), env_vars.get("CUDA_VISIBLE_DEVICES"))
+        check_gpus(name, remote.gpus(), env_vars.get("CUDA_VISIBLE_DEVICES"), rented=_rented(name) is not None)
         remote.install_uv()
         env = capture_env(local_python(store.root, command))
         spec = env_spec(store.root, env)
@@ -116,7 +195,7 @@ def run(name: str, command: list[str], why: str | None, parent_ref: str | None, 
         write_json(run_dir / "env.json", env)  # this computer's environment, until the machine records its own
         paths = remote.paths(project, run_dir.name)
         mirror.write_state(run_dir, {"machine": name, "dir": paths.run_dir, "work": paths.work, "pidfile": paths.pidfile,
-                                     "venv": venv})
+                                     "venv": venv, **_rented_state(name)})
         started = time.monotonic()
         may_be_running = False
         try:
@@ -145,9 +224,10 @@ def run(name: str, command: list[str], why: str | None, parent_ref: str | None, 
                        duration=time.monotonic() - started)
             raise
         say(f"run {run_dir.name} started on {name}. Ctrl+C stops copying, not the run")
-        return mirror.follow(remote, run_dir)
+        code = mirror.follow(remote, run_dir, until=_until(name))
     finally:
         remote.box.close()
+    return _after(name, run_dir, code)
 
 
 def attach(ref: str) -> int:
@@ -157,9 +237,10 @@ def attach(ref: str) -> int:
     remote = connect(state["machine"])
     try:
         say(f"copying {run.id} from {state['machine']}")
-        return mirror.follow(remote, run.dir)
+        code = mirror.follow(remote, run.dir, until=_until(state["machine"]))
     finally:
         remote.box.close()
+    return _after(state["machine"], run.dir, code)
 
 
 def stop(ref: str) -> int:
@@ -219,7 +300,7 @@ def ps() -> int:
     for machine, runs in away.items():
         states, problem = None, None
         try:
-            remote = connect(machine)
+            remote = connect(machine, wake=False)
             try:
                 states = remote.states([[state["dir"], state["pidfile"]] for _, state in runs])
             finally:
@@ -228,7 +309,9 @@ def ps() -> int:
             problem = e
         for i, (run, _) in enumerate(runs):
             short = run.id[-4:]
-            if states is None:
+            if isinstance(problem, rent.Stopped):
+                what, hint = f"ended on {machine}, which stopped itself so only its disk costs", f"ferry attach {short} starts it again and brings the run home"
+            elif states is None:
                 what, hint = f"on {machine}, which cannot be reached ({problem})", f"if it is gone for good, ferry forget {short} marks it lost"
             elif states[i] == "running":
                 copied = mirror.being_copied(run.dir)

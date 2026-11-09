@@ -80,6 +80,41 @@ machine how its runs are doing. A run whose process on the machine dies without 
 machine is gone for good, `ferry forget a7f3` stops counting its run as running, and Hunch shows it as lost; should the
 machine come back, `ferry attach a7f3` picks the run up again.
 
+## Renting a GPU on Vast.ai
+
+No GPU machine of your own? Rent one with your own [Vast.ai](https://vast.ai) account. Ferry talks to Vast.ai
+directly, and you pay Vast.ai; nothing goes through anyone else.
+
+```bash
+ferry login vast                        # once: your API key, kept in the OS keychain
+ferry gpus --gpu "RTX 4090"             # what you can rent now, cheapest first
+ferry run --rent "RTX 4090" --for 2h -m "bigger batch" -- python train.py
+```
+
+`--rent` takes an offer from `ferry gpus`, or a GPU name for its cheapest offer. Ferry says what it picked and the
+most it can cost, and asks first. `--for` is required: the machine destroys itself when that time is up, even with
+your laptop shut. Once the run is home, Ferry gives the machine back, and the run records what it cost
+(`cost.json`).
+
+To keep a machine for several runs, rent it on its own and give it back when you are done:
+
+```bash
+ferry rent "RTX 4090" --for 3h          # adds it as a machine, such as vast-12345
+ferry run --on vast-12345 -- python train.py
+ferry release vast-12345
+```
+
+`ferry machines` shows each rented machine's time left and its cost so far.
+
+- Only hosts Vast.ai has verified, unless you ask with `ferry gpus --any-host`. Like any host, a host can see the
+  code and data you send it.
+- Your Vast.ai key stays on your computer, in the keychain or in `VAST_API_KEY`. The machine gets an SSH key of its
+  own and Vast.ai's key for that one machine, which can do nothing else; it uses that key to destroy itself on time.
+- When a run has ended and no laptop has brought it home for 15 minutes, the machine stops itself: the GPU stops
+  costing, and only its disk does (40 GB costs about $0.30 to $0.90 a day, depending on the host). `ferry attach`
+  starts it again and brings the run home; `ferry release` gives it back.
+- A machine whose SSH port does not answer within 15 seconds goes back at once, and Ferry takes the next offer.
+
 ## Disk space
 
 ```bash
@@ -93,5 +128,6 @@ needs it.
 ## What stays where
 
 Nothing secret goes into `.hunch/` or to the machine: no keys, no passwords. Tokens passed with `--env` exist only in
-the run's memory. Ferry's own settings (the machines
-you added and their host keys) are in `%APPDATA%\ferry` on Windows and `~/.config/ferry` elsewhere.
+the run's memory. Your Vast.ai key is in the OS keychain. Ferry's own settings (the machines
+you added and their host keys, and each rented machine's own SSH key until it goes back) are in `%APPDATA%\ferry` on
+Windows and `~/.config/ferry` elsewhere.

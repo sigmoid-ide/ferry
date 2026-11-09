@@ -21,7 +21,7 @@ from pathlib import Path
 import paramiko
 from hunch.store import LOST_AFTER_SECONDS, read_json, write_json
 
-from . import data
+from . import data, rent
 from .config import FerryError
 from .remote import Remote
 
@@ -185,13 +185,17 @@ def _report_files(remote: Remote, state: dict, run_dir: Path, label: str, status
               f"Bring them home with: ferry pull {short} PATH", file=sys.stderr)
 
 
-def follow(remote: Remote, run_dir: Path, echo_output: bool = True) -> int:
-    """Copies the run home until it ends. Ctrl+C stops copying, never the run."""
+CAPPED = 124  # what follow returns when a rented machine's time is up before the run ended
+
+
+def follow(remote: Remote, run_dir: Path, echo_output: bool = True, until: float | None = None) -> int:
+    """Copies the run home until it ends, or until `until` (a rented machine's time cap).
+    Ctrl+C stops copying, never the run."""
     with _CopyLock(run_dir):
-        return _follow(remote, run_dir, echo_output)
+        return _follow(remote, run_dir, echo_output, until)
 
 
-def _follow(remote: Remote, run_dir: Path, echo_output: bool) -> int:
+def _follow(remote: Remote, run_dir: Path, echo_output: bool, until: float | None = None) -> int:
     state = read_state(run_dir)
     label = state.get("machine", remote.box.label)
     offset = remote.now() - time.time()
@@ -233,6 +237,9 @@ def _follow(remote: Remote, run_dir: Path, echo_output: bool) -> int:
                 continue
             if ended:
                 break
+            if until is not None and time.time() >= until:
+                print(f"\nferry: the time you rented {label} for is up, before the run ended.", file=sys.stderr)
+                return CAPPED
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt:
         print(f"\nferry: stopped copying. The run is still going on {label}; `ferry attach {run_dir.name[-4:]}` picks it up again.",
@@ -248,6 +255,8 @@ def _follow(remote: Remote, run_dir: Path, echo_output: bool) -> int:
         raise FerryError(f"the copy of {run_dir.name} does not match {label}'s; run `ferry attach` to try again")
     state["complete"] = True
     write_state(run_dir, state)
+    if state.get("provider"):
+        rent.mark_home(remote.box, run_dir.name)
     end = read_json(run_dir / "end.json", {})
     status = end.get("status", "finished")
     print(f"ferry: run {run_dir.name} {status} on {label}; everything is home.", file=sys.stderr)

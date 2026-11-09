@@ -21,7 +21,7 @@ from pathlib import Path
 
 import paramiko
 
-from .config import FerryError, Machine, can_ask, known_hosts_path, parse_target
+from .config import FerryError, Machine, can_ask, known_hosts_for, parse_target
 
 MAX_JUMPS = 8  # more hops than this is a ProxyJump that leads back to itself
 CONNECT_TIMEOUT = 15  # seconds to reach the machine, then for its SSH banner and the login each
@@ -136,7 +136,7 @@ class Box:
         """Connects. `trust(label, fingerprint, key type)` decides about a host key Ferry
         has not seen, the machine's or a jump host's; without it, an unknown key is refused."""
         self.close()
-        path = known_hosts_path()
+        path = known_hosts_for(self.machine)
         client = paramiko.SSHClient()
         if path.is_file():
             client.load_host_keys(str(path))
@@ -154,6 +154,9 @@ class Box:
             return self.connect()
         except paramiko.BadHostKeyException:
             client.close()
+            if self.machine.provider:
+                raise FerryError(f"{self.label} answered with a host key other than the one its provider showed. "
+                                 f"Something may be in the way; `ferry release {self.label}` gives it back") from None
             raise FerryError(
                 f"{self.label}'s host key has changed since you added it. If you reinstalled the machine, "
                 f"remove its line from {path} and run ferry add again; otherwise something may be in the way"

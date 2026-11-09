@@ -36,7 +36,8 @@ def test_ps_says_how_each_run_is_and_what_to_do(tmp_path, monkeypatch, capsys):
     lost = away_run(store, "far away", machine="oldbox")
     answers = {runs["going"].name: "running", runs["done"].name: "ended", runs["died"].name: "gone", runs["wiped"].name: "missing"}
 
-    def connect(name):
+    def connect(name, wake=True):
+        assert wake is False  # ps never starts a rented machine that stopped itself
         if name == "oldbox":
             raise FerryError("could not reach oldbox (10.0.0.9:22): timed out")
         return StatesRemote(answers)

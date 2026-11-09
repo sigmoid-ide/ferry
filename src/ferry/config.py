@@ -57,6 +57,28 @@ class Machine:
     gpu: str | None = None
     driver: str | None = None
     python: str | None = None
+    # A machine rented with `ferry rent`: which instance, what it costs, and when it destroys itself.
+    provider: str | None = None
+    instance: int | None = None
+    price: float | None = None  # $ per hour, its disk included
+    disk_rate: float | None = None  # $ per hour its disk costs alone, which it still pays while stopped
+    tier: str | None = None
+    place: str | None = None
+    rented_at: float | None = None  # Unix time
+    deadline: float | None = None  # Unix time
+    stopped_seconds: float | None = None  # time it stood stopped, paying for its disk only
+    once: bool | None = None  # rented for one run, and released once that run is home
+
+
+def rented_dir(name: str) -> Path:
+    """A rented machine's own SSH key and pinned host keys, deleted when it is released."""
+    return home() / "rented" / name
+
+
+def known_hosts_for(machine: Machine) -> Path:
+    """Where a machine's host keys are pinned. A rented machine's are its own, because
+    Vast hands the same address and port to one instance after another."""
+    return rented_dir(machine.name) / "known_hosts" if machine.provider else known_hosts_path()
 
 
 def _machines_path() -> Path:
@@ -75,6 +97,16 @@ def load_machines() -> dict[str, Machine]:
 def save_machine(machine: Machine) -> None:
     machines = load_machines()
     machines[machine.name] = machine
+    _save(machines)
+
+
+def remove_machine(name: str) -> None:
+    machines = load_machines()
+    if machines.pop(name, None) is not None:
+        _save(machines)
+
+
+def _save(machines: dict[str, Machine]) -> None:
     path = _machines_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
