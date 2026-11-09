@@ -280,21 +280,28 @@ def _wait_running(v: Vast, instance: int, name: str, waking: bool = False) -> di
     """Waits for the instance to run. A new one that goes exited, unknown or offline never
     will; one being started again shows exited until it does (Vast's word for stopped,
     9 Nov 2026)."""
-    deadline = time.monotonic() + BOOT_WAIT
-    last = None
+    started = time.monotonic()
+    deadline = started + BOOT_WAIT
+    last, said = "", 0.0
     while time.monotonic() < deadline:
         details = v.instance(instance)
         if details is None:
             raise _Unusable("it disappeared while starting")
         status = details.get("actual_status")
-        message = (details.get("status_msg") or "").strip()
-        if (status, message) != last and status:
-            say(f"{name}: {status}{': ' + message[:100] if message and status != 'running' else ''}")
-            last = (status, message)
+        # Vast's status_msg during "loading" is the image pull's log, many lines per layer: the first line only.
+        message = (details.get("status_msg") or "").strip().splitlines()[:1]
+        message = message[0][:100] if message else ""
         if status == "running" and details.get("intended_status", "running") == "running":
             return details
         if status in ("unknown", "offline") or (status == "exited" and not waking):
-            raise _Unusable(f"it went {status}{': ' + message[:100] if message else ''}")
+            raise _Unusable(f"it went {status}{': ' + message if message else ''}")
+        now = time.monotonic()
+        if status != last:
+            say(f"{name}: {_phase(status, waking)}")
+            last, said = status, now
+        elif status == "loading" and now - said >= 60:
+            say(f"{name}: still downloading its image ({duration(now - started)} so far)")
+            said = now
         time.sleep(5)
     raise _Unusable(f"it did not start within {BOOT_WAIT // 60} minutes")
 
@@ -311,6 +318,15 @@ def _host_keys(v: Vast, instance: int) -> list[paramiko.PKey]:
             if not _whole(match[1], match[2]):
                 continue
             try:
+def _phase(status: str | None, waking: bool) -> str:
+    if status == "loading":
+        return ("the host is downloading the machine's image, which takes a few minutes when the host does not "
+                "have it yet; Vast.ai does not bill for this")
+    if status in ("exited", "stopped") and waking:
+        return "starting again"
+    return "waiting for the host" if status in (None, "created") else str(status)
+
+
                 entry = paramiko.hostkeys.HostKeyEntry.from_line(f"x {match[1]} {match[2]}")
             except (paramiko.hostkeys.InvalidHostKey, paramiko.SSHException, ValueError, TypeError):
                 continue
